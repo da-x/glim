@@ -22,7 +22,7 @@ jobs:
         CARGO_TERM_COLOR: always
       run: |
         cargo build --release --verbose
-        zip glcim.zip --junk-paths glcim/glcim
+        zip glcim.zip --junk-paths target/release/glcim
 
     - name: Create Release
       id: create_release

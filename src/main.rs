@@ -239,7 +239,6 @@ impl Thread {
                                 JobScope::Failed,
                                 JobScope::Success,
                                 JobScope::Canceled,
-                                JobScope::Skipped,
                             ].into_iter())
                             .build().unwrap();
                         let endpoint = gitlab::api::paged(endpoint,

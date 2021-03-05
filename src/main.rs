@@ -1,5 +1,5 @@
 use serde::Deserialize;
-use gitlab::Gitlab;
+use gitlab::{Gitlab, api::projects::jobs::JobScope};
 use gitlab::api::{projects, Query, users};
 use gitlab::api::projects::pipelines::PipelineOrderBy;
 use chrono::{DateTime, Local};
@@ -48,15 +48,30 @@ struct PipelinesMode {
 }
 
 #[derive(Debug, StructOpt, Clone)]
+struct JobsMode {
+    #[structopt(name = "pipeline-id", short="p")]
+    pipeline_id: u64,
+}
+
+#[derive(Debug, StructOpt, Clone)]
 enum CommandMode {
+    /// Show all pipelines for a project, or specific to current user
     #[structopt(name = "pipelines")]
     Pipelines(PipelinesMode),
+
+    /// Show all jobs related to a given pipeline
+    #[structopt(name = "jobs")]
+    Jobs(JobsMode),
 }
 
 #[derive(Debug, StructOpt)]
 struct CommandArgs {
     #[structopt(name = "config-file", short="c")]
     config: Option<PathBuf>,
+
+    /// Request debug mode - no TUI
+    #[structopt(name = "debug", short="d")]
+    debug: bool,
 
     #[structopt(subcommand)]
     command: CommandMode,
@@ -78,6 +93,13 @@ struct Pipeline {
     web_url: String,
     created_at: DateTime<Local>,
     updated_at: DateTime<Local>,
+}
+
+#[derive(Debug, Deserialize)]
+struct Job {
+    id: u64,
+    name: String,
+    status: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -117,17 +139,15 @@ impl<T> Updatable<T> {
     }
 }
 
-#[derive(Default)]
-struct State {
-    request_count: u64,
-    pipelines: Updatable<Vec<Pipeline>>,
-    pipeline_trigger: std::collections::HashMap<u64, String>,
-}
+impl<T> Updatable<Vec<T>> {
+    fn fix_selected(&self, s: &mut tui::widgets::TableState, visible: Option<usize>) {
+        if let Some((_, items)) = &self.data {
+            let l = if let Some(visible) = visible {
+                std::cmp::min(items.len(), visible)
+            } else {
+                items.len()
+            };
 
-impl State {
-    fn fix_selected_pipelines(&self, s: &mut tui::widgets::TableState, visible: usize) {
-        if let Some((_, pipelines)) = &self.pipelines.data {
-            let l = std::cmp::min(pipelines.len(), visible);
             if let Some(selected) = s.selected() {
                 if l > 0 && l <= selected {
                     s.select(Some(l - 1));
@@ -143,10 +163,20 @@ impl State {
             s.select(None);
         }
     }
+
+}
+
+#[derive(Default)]
+struct State {
+    request_count: u64,
+    pipelines: Updatable<Vec<Pipeline>>,
+    jobs: Updatable<Vec<Job>>,
+    pipeline_trigger: std::collections::HashMap<u64, String>,
 }
 
 enum RxCmd {
     Refresh,
+    UpdateMode(CommandMode),
 }
 
 struct Thread {
@@ -155,8 +185,9 @@ struct Thread {
     state: Arc<Mutex<State>>,
     rsp_sender: channel::mpsc::Sender<()>,
     current_user: User,
-    command: CommandMode,
+    mode: CommandMode,
     config: Config,
+    debug: bool,
 }
 
 impl Thread {
@@ -166,12 +197,52 @@ impl Thread {
 
             match cmd {
                 RxCmd::Refresh => {}
+                RxCmd::UpdateMode(mode) => {
+                    self.mode = mode;
+                }
             }
 
             let mut updates = 0;
             let mut resolve_pipeline_trigger = vec![];
 
-            match &self.command {
+            if self.debug {
+                println!("glcim: request iteration");
+            }
+
+            match &self.mode {
+                CommandMode::Jobs(info) => {
+                    if self.state.lock().unwrap().jobs.update {
+                        let endpoint =
+                            projects::pipelines::PipelineJobs::builder()
+                            .project(self.config.project.clone())
+                            .pipeline(info.pipeline_id)
+                            .scopes(vec![
+                                JobScope::Created,
+                                JobScope::Pending,
+                                JobScope::Running,
+                                JobScope::Failed,
+                                JobScope::Success,
+                                JobScope::Canceled,
+                                JobScope::Skipped,
+                            ].into_iter())
+                            .build().unwrap();
+                        let endpoint = gitlab::api::paged(endpoint,
+                            gitlab::api::Pagination::Limit(200));
+                        let jobs : Vec<Job> = endpoint.query(&self.gitlab).unwrap();
+                        let mut state = self.state.lock().unwrap();
+
+                        if self.debug {
+                            println!("glcim: jobs: {:?}", jobs);
+                        }
+
+                        if state.jobs.update {
+                            state.jobs.data = Some((Instant::now(), jobs));
+                            state.request_count += 1;
+                            updates += 1;
+                            state.jobs.updated();
+                        }
+                    }
+                }
                 CommandMode::Pipelines(info) => {
                     if self.state.lock().unwrap().pipelines.update {
                         let mut endpoint = projects::pipelines::Pipelines::builder();
@@ -181,8 +252,14 @@ impl Thread {
                             endpoint.username(&self.current_user.username);
                         }
                         let endpoint = endpoint.build().unwrap();
+                        let endpoint = gitlab::api::paged(endpoint,
+                            gitlab::api::Pagination::Limit(30));
 
                         let pipelines : Vec<Pipeline> = endpoint.query(&self.gitlab).unwrap();
+
+                        if self.debug {
+                            println!("glcim: pipelines: {:?}", pipelines);
+                        }
 
                         let mut state = self.state.lock().unwrap();
 
@@ -208,6 +285,9 @@ impl Thread {
                     .pipeline(id)
                     .build().unwrap();
                 let pipeline : PipelineDetails = endpoint.query(&self.gitlab).unwrap();
+                if self.debug {
+                    println!("glcim: pipeline: {:?}", pipeline);
+                }
                 let mut state = self.state.lock().unwrap();
                 state.pipeline_trigger.insert(id, pipeline.user.username);
                 state.request_count += 1;
@@ -230,17 +310,19 @@ struct Main {
     state: Arc<Mutex<State>>,
     tx_cmd: mpsc::Sender<RxCmd>,
     rsp_recv: Option<channel::mpsc::Receiver<()>>,
+    prev_mode: Option<CommandMode>,
     mode: CommandMode,
     selected_pipeline: tui::widgets::TableState,
+    selected_job: tui::widgets::TableState,
     ignored_pipeline_ids: std::collections::HashSet<u64>,
     pipeline_ids: Vec<u64>,
+    debug: bool,
     leave: bool,
 }
 
 impl Main {
-    fn new() -> Result<Self, Error> {
-        let opt = CommandArgs::from_args();
-        let config_path = if let Some(config) = opt.config {
+    fn new(opt: &CommandArgs) -> Result<Self, Error> {
+        let config_path = if let Some(config) = &opt.config {
             config.clone()
         } else {
             if let Some(dir) = dirs::config_dir() {
@@ -275,6 +357,7 @@ impl Main {
 
         let command = opt.command.clone();
 
+        let debug = opt.debug;
         std::thread::spawn(move || {
             Thread {
                 config: config2,
@@ -283,13 +366,18 @@ impl Main {
                 rx_cmd: rx,
                 rsp_sender,
                 current_user,
-                command
+                debug,
+                mode: command
             }.run();
         });
 
-        enable_raw_mode()?;
+        if !opt.debug {
+            enable_raw_mode()?;
+        }
         let mut stdout = stdout();
-        execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+        if !opt.debug {
+            execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+        }
         let backend = CrosstermBackend::new(stdout);
         let terminal = Terminal::new(backend)?;
 
@@ -297,11 +385,14 @@ impl Main {
             terminal,
             state,
             selected_pipeline: Default::default(),
+            selected_job: Default::default(),
             ignored_pipeline_ids: Default::default(),
             pipeline_ids: vec![],
             leave: false,
             tx_cmd: tx,
-            mode: opt.command,
+            debug: opt.debug,
+            prev_mode: None,
+            mode: opt.command.clone(),
             rsp_recv: Some(rsp_recv),
         })
     }
@@ -314,8 +405,17 @@ impl Main {
             let updates : usize = {
                 let mut state = self.state.lock().unwrap();
                 let mut updates = 0;
-                if state.pipelines.check_expiry(std::time::Duration::from_millis(10000)) {
-                    updates += 1;
+                match self.mode {
+                    CommandMode::Pipelines{..} => {
+                        if state.pipelines.check_expiry(std::time::Duration::from_millis(10000)) {
+                            updates += 1;
+                        }
+                    },
+                    CommandMode::Jobs{..} => {
+                        if state.jobs.check_expiry(std::time::Duration::from_millis(10000)) {
+                            updates += 1;
+                        }
+                    },
                 }
                 updates
             };
@@ -323,7 +423,9 @@ impl Main {
                 let _ = self.tx_cmd.send(RxCmd::Refresh);
             }
 
-            self.draw()?;
+            if !self.debug {
+                self.draw()?;
+            }
 
             let delay = Delay::new(Duration::from_millis(1000));
 
@@ -352,9 +454,17 @@ impl Main {
     }
 
     fn draw(&mut self) -> Result<(), Error> {
+        match self.mode {
+            CommandMode::Pipelines{..} => self.draw_pipelines(),
+            CommandMode::Jobs{..} => self.draw_jobs(),
+        }
+    }
+
+    fn draw_pipelines(&mut self) -> Result<(), Error> {
         let state = self.state.lock().unwrap();
 
-        state.fix_selected_pipelines(&mut self.selected_pipeline, self.pipeline_ids.len());
+        state.pipelines.fix_selected(&mut self.selected_pipeline,
+            Some(self.pipeline_ids.len()));
         let selected_pipeline = &mut self.selected_pipeline;
         let pipeline_ids = &mut self.pipeline_ids;
         let ignored_pipeline_ids = &self.ignored_pipeline_ids;
@@ -434,7 +544,7 @@ impl Main {
                     .border_type(BorderType::Plain),
             )
             .highlight_style(
-                Style::default() .bg(Color::Rgb(40, 40, 40))
+                Style::default().bg(Color::Rgb(60, 60, 80))
             )
             .widths(&[
                 Constraint::Length(8),
@@ -451,10 +561,90 @@ impl Main {
         Ok(())
     }
 
+    fn draw_jobs(&mut self) -> Result<(), Error> {
+        let state = self.state.lock().unwrap();
+
+        state.jobs.fix_selected(&mut self.selected_job, None);
+        let selected_job = &mut self.selected_job;
+
+        self.terminal.draw(|rect| {
+            use tui::{style::{Color, Modifier, Style}, text::Span};
+            use tui::widgets::{Table, Cell, Row, BorderType};
+
+            let mut items: Vec<_> = vec![];
+            if let Some((_, jobs)) = &state.jobs.data {
+                for job in jobs.iter() {
+                    let status = Span::styled(
+                        &job.status,
+                        Style::default().fg(match job.status.as_str() {
+                            "failed" => Color::Red,
+                            "running" => Color::Cyan,
+                            "success" => Color::Green,
+                            "canceled" => Color::Gray,
+                            _ => Color::White,
+                        }),
+                    );
+
+                    items.push(Row::new(vec![
+                        Cell::from(Span::raw(job.id.to_string())),
+                        Cell::from(status),
+                        Cell::from(Span::raw(job.name.to_string())),
+                    ]));
+                }
+            }
+
+            let jobs = Table::new(items)
+            .header(Row::new(vec![
+                Cell::from(Span::styled(
+                    "ID",
+                    Style::default().add_modifier(Modifier::BOLD),
+                )),
+                Cell::from(Span::styled(
+                    "Status",
+                    Style::default().add_modifier(Modifier::BOLD),
+                )),
+                Cell::from(Span::styled(
+                    "Name",
+                    Style::default().add_modifier(Modifier::BOLD),
+                )),
+            ]))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .style(Style::default().fg(Color::White))
+                    .title("Jobs")
+                    .border_type(BorderType::Plain),
+            )
+            .highlight_style(
+                Style::default().bg(Color::Rgb(60, 60, 80))
+            )
+            .widths(&[
+                Constraint::Length(10),
+                Constraint::Length(15),
+                Constraint::Length(40),
+            ]);
+
+            rect.render_stateful_widget(jobs, rect.size(), selected_job);
+        })?;
+
+        Ok(())
+    }
+
     fn on_up(&mut self) -> Result<(), Error> {
         let state = self.state.lock().unwrap();
 
         match self.mode {
+            CommandMode::Jobs(_) => {
+                if let Some(selected) = self.selected_job.selected() {
+                    if selected > 0 {
+                        self.selected_job.select(Some(selected - 1));
+                    }
+                } else {
+                    self.selected_job.select(Some(0));
+                }
+
+                state.jobs.fix_selected(&mut self.selected_job, None)
+            }
             CommandMode::Pipelines(_) => {
                 if let Some(selected) = self.selected_pipeline.selected() {
                     if selected > 0 {
@@ -464,7 +654,8 @@ impl Main {
                     self.selected_pipeline.select(Some(0));
                 }
 
-                state.fix_selected_pipelines(&mut self.selected_pipeline, self.pipeline_ids.len());
+                state.pipelines.fix_selected(&mut self.selected_pipeline,
+                    Some(self.pipeline_ids.len()));
             }
         }
 
@@ -475,6 +666,15 @@ impl Main {
         let state = self.state.lock().unwrap();
 
         match self.mode {
+            CommandMode::Jobs(_) => {
+                if let Some(selected) = self.selected_job.selected() {
+                    self.selected_job.select(Some(selected + 1));
+                } else {
+                    self.selected_job.select(Some(0));
+                }
+
+                state.jobs.fix_selected(&mut self.selected_job, None)
+            }
             CommandMode::Pipelines(_) => {
                 if let Some(selected) = self.selected_pipeline.selected() {
                     self.selected_pipeline.select(Some(selected + 1));
@@ -482,8 +682,47 @@ impl Main {
                     self.selected_pipeline.select(Some(0));
                 }
 
-                state.fix_selected_pipelines(&mut self.selected_pipeline,
-                    self.pipeline_ids.len());
+                state.pipelines.fix_selected(&mut self.selected_pipeline,
+                    Some(self.pipeline_ids.len()));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn on_backspace(&mut self) -> Result<(), Error> {
+        match self.mode {
+            CommandMode::Jobs(_) => {
+                if let Some(mode) = self.prev_mode.take() {
+                    self.mode = mode;
+                    let _ = self.tx_cmd.send(RxCmd::UpdateMode(self.mode.clone()));
+                }
+            }
+            CommandMode::Pipelines(_) => {
+            }
+        }
+
+        Ok(())
+    }
+
+    fn on_enter(&mut self) -> Result<(), Error> {
+        match self.mode {
+            CommandMode::Jobs(_) => {}
+            CommandMode::Pipelines(_) => {
+                if let Some(selected) = self.selected_pipeline.selected() {
+                    if selected < self.pipeline_ids.len() {
+                        let id = self.pipeline_ids[selected];
+                        self.selected_job.select(None);
+                        self.prev_mode = Some(std::mem::replace(&mut self.mode,
+                            CommandMode::Jobs(JobsMode {
+                                pipeline_id: id
+                            })
+                        ));
+                        let mut state = self.state.lock().unwrap();
+                        state.jobs.data = None;
+                        let _ = self.tx_cmd.send(RxCmd::UpdateMode(self.mode.clone()));
+                    }
+                }
             }
         }
 
@@ -492,6 +731,7 @@ impl Main {
 
     fn on_delete(&mut self) -> Result<(), Error> {
         match self.mode {
+            CommandMode::Jobs(_) => {}
             CommandMode::Pipelines(_) => {
                 if let Some(selected) = self.selected_pipeline.selected() {
                     if selected < self.pipeline_ids.len() {
@@ -518,6 +758,12 @@ impl Main {
                     crossterm::event::KeyCode::Char('r') => {
                         self.ignored_pipeline_ids.clear();
                     },
+                    crossterm::event::KeyCode::Enter => {
+                        self.on_enter()?;
+                    },
+                    crossterm::event::KeyCode::Backspace => {
+                        self.on_backspace()?;
+                    },
                     crossterm::event::KeyCode::Delete => {
                         self.on_delete()?;
                     },
@@ -538,7 +784,11 @@ impl Main {
 }
 
 fn main_wrap() -> Result<(), Error> {
-    let mut glcim = Main::new()?;
+    let opt = CommandArgs::from_args();
+    let mut glcim = Main::new(&opt)?;
+
+    if !opt.debug {
+    }
 
     let (mut glcim, v) = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -550,13 +800,15 @@ fn main_wrap() -> Result<(), Error> {
             (glcim, v)
         });
 
-    disable_raw_mode()?;
-    execute!(
-        glcim.terminal.backend_mut(),
-        LeaveAlternateScreen,
-        DisableMouseCapture
-    )?;
-    glcim.terminal.show_cursor()?;
+    if !opt.debug {
+        disable_raw_mode()?;
+        execute!(
+            glcim.terminal.backend_mut(),
+            LeaveAlternateScreen,
+            DisableMouseCapture
+        )?;
+        glcim.terminal.show_cursor()?;
+    }
 
     v?;
     Ok(())

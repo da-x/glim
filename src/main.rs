@@ -430,7 +430,7 @@ impl Main {
                 Block::default()
                     .borders(Borders::ALL)
                     .style(Style::default().fg(Color::White))
-                    .title("Detail")
+                    .title("Pipelines")
                     .border_type(BorderType::Plain),
             )
             .highlight_style(

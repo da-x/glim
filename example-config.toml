@@ -1,0 +1,5 @@
+# ~/.config/glcim/config.toml
+
+api_key = "<SECRET-KEY>"
+hostname = "your-gitlab-server.com"
+project = "dev/project"

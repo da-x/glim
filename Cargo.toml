@@ -1,0 +1,19 @@
+[package]
+name = "glcim"
+version = "0.1.0"
+authors = ["Dan Aloni"]
+edition = "2018"
+
+[dependencies]
+gitlab = "0.1210"
+serde = { version = "1", features = ["derive"] }
+chrono = "0.4"
+config = "0.10"
+tui = { version = "0.14", features = ["crossterm"] }
+thiserror = "1"
+structopt = "0.3"
+dirs = "3"
+crossterm = { version = "0.19", features = ["event-stream"] }
+futures = "0.3"
+futures-timer = "2"
+tokio = {version = "1", features = ["rt", "process", "io-util", "rt-multi-thread"]}

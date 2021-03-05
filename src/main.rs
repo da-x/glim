@@ -29,6 +29,8 @@ use futures::{
 pub enum Error {
     #[error("Io error; {0}")]
     IoError(#[from] std::io::Error),
+    #[error("Var error; {0}")]
+    VarError(#[from] std::env::VarError),
     #[error("Config error: {0}")]
     ConfigError(#[from] config::ConfigError),
     #[error("Recv error: {0}")]
@@ -82,6 +84,20 @@ struct Config {
     api_key: String,
     hostname: String,
     project: String,
+
+    #[serde(default)]
+    hooks: ConfigHooks,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+struct ConfigHooks {
+    /// Shell command to execute when opening a Job (using $SHELL).
+    ///
+    /// The following environment variables will be defined:
+    ///
+    /// $GLCIM_JOB_ID, $GLCIM_PIPELINE_ID, $GLCIM_HOSTNAME, $GLCIM_API_KEY,
+    /// $GLCIM_PROJECT
+    open_job_command: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -316,6 +332,8 @@ struct Main {
     selected_job: tui::widgets::TableState,
     ignored_pipeline_ids: std::collections::HashSet<u64>,
     pipeline_ids: Vec<u64>,
+    job_ids: Vec<u64>,
+    config: Config,
     debug: bool,
     leave: bool,
 }
@@ -344,7 +362,7 @@ impl Main {
         let config2 = config.clone();
 
         // Create the client.
-        let client = Gitlab::new(config.hostname, config.api_key).unwrap();
+        let client = Gitlab::new(&config.hostname, &config.api_key).unwrap();
 
         let endpoint = users::CurrentUser::builder()
             .build().unwrap();
@@ -388,8 +406,10 @@ impl Main {
             selected_job: Default::default(),
             ignored_pipeline_ids: Default::default(),
             pipeline_ids: vec![],
+            job_ids: vec![],
             leave: false,
             tx_cmd: tx,
+            config,
             debug: opt.debug,
             prev_mode: None,
             mode: opt.command.clone(),
@@ -565,7 +585,10 @@ impl Main {
         let state = self.state.lock().unwrap();
 
         state.jobs.fix_selected(&mut self.selected_job, None);
+        let job_ids = &mut self.job_ids;
         let selected_job = &mut self.selected_job;
+
+        job_ids.clear();
 
         self.terminal.draw(|rect| {
             use tui::{style::{Color, Modifier, Style}, text::Span};
@@ -574,6 +597,7 @@ impl Main {
             let mut items: Vec<_> = vec![];
             if let Some((_, jobs)) = &state.jobs.data {
                 for job in jobs.iter() {
+                    job_ids.push(job.id);
                     let status = Span::styled(
                         &job.status,
                         Style::default().fg(match job.status.as_str() {
@@ -707,7 +731,30 @@ impl Main {
 
     fn on_enter(&mut self) -> Result<(), Error> {
         match self.mode {
-            CommandMode::Jobs(_) => {}
+            CommandMode::Jobs(ref info) => {
+                if let Some(open_job_command) = &self.config.hooks.open_job_command {
+                    if let Some(selected) = self.selected_job.selected() {
+                        if selected < self.job_ids.len() {
+                            let id = self.job_ids[selected];
+                            let shell = std::env::var("SHELL")?;
+                            let mut command =
+                                std::process::Command::new(shell);
+                            command.arg("-c");
+                            command.arg(open_job_command);
+                            command.env("GLCIM_JOB_ID", format!("{}", id));
+                            command.env("GLCIM_PIPELINE_ID", format!("{}",
+                                info.pipeline_id));
+                            command.env("GLCIM_PROJECT", &self.config.project);
+                            command.env("GLCIM_HOSTNAME", &self.config.hostname);
+                            command.env("GLCIM_API_KEY", &self.config.api_key);
+                            if let Ok(mut v) = command.spawn() {
+                                let _ = v.wait();
+                            }
+                            // TODO: report error
+                        }
+                    }
+                }
+            }
             CommandMode::Pipelines(_) => {
                 if let Some(selected) = self.selected_pipeline.selected() {
                     if selected < self.pipeline_ids.len() {
@@ -731,7 +778,8 @@ impl Main {
 
     fn on_delete(&mut self) -> Result<(), Error> {
         match self.mode {
-            CommandMode::Jobs(_) => {}
+            CommandMode::Jobs(_) => {
+            }
             CommandMode::Pipelines(_) => {
                 if let Some(selected) = self.selected_pipeline.selected() {
                     if selected < self.pipeline_ids.len() {

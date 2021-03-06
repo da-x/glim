@@ -21,4 +21,5 @@ mkdir -p $T
 cargo build --release --target-dir ${T}
 
 mkdir -p bin/
+rm -f ${dest}
 cp $T/release/${EXENAME} ${dest}

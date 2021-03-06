@@ -85,6 +85,9 @@ struct Config {
     hostname: String,
     project: String,
 
+    /// Webview session can be used for online job traces update
+    cookie: Option<String>,
+
     #[serde(default)]
     hooks: ConfigHooks,
 }
@@ -746,6 +749,9 @@ impl Main {
                             command.env("GLCIM_PROJECT", &self.config.project);
                             command.env("GLCIM_HOSTNAME", &self.config.hostname);
                             command.env("GLCIM_API_KEY", &self.config.api_key);
+                            if let Some(cookie) = &self.config.cookie {
+                                command.env("GLCIM_COOKIE", &cookie);
+                            }
                             if let Ok(mut v) = command.spawn() {
                                 let _ = v.wait();
                             }

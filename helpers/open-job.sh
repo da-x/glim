@@ -9,11 +9,20 @@
 
 front-program() {
     local project="${GLCIM_PROJECT//\//%2F}"
+    set +e
+
     while [ 1 ] ; do
-	curl\
-	    --location --header "PRIVATE-TOKEN: ${GLCIM_API_KEY}" \
-	    "https://${GLCIM_HOSTNAME}/api/v4/projects/${project}/jobs/"${GLCIM_JOB_ID}"/trace" \
-	   -L -s -o ${1} -C -
+	if [[ "${GLCIM_COOKIE}" != "" ]] ; then
+	    curl \
+		--header "Cookie: _gitlab_session="$GLCIM_COOKIE \
+		https://${GLCIM_HOSTNAME}/${GLCIM_PROJECT}/-/jobs/${GLCIM_JOB_ID}/raw \
+		-L -s -o ${1} -C -
+	else
+	    curl \
+		--header "PRIVATE-TOKEN: ${GLCIM_API_KEY}" \
+		"https://${GLCIM_HOSTNAME}/api/v4/projects/${project}/jobs/"${GLCIM_JOB_ID}"/trace" \
+		-L -s -o ${1} -C -
+	fi
 	sleep 1
     done
 }
@@ -41,7 +50,7 @@ tail-program() {
 }
 
 tmux-split() {
-    tmux split-window "GLCIM_API_KEY=${GLCIM_API_KEY} GLCIM_HOSTNAME=${GLCIM_HOSTNAME} GLCIM_PIPELINE_ID=${GLCIM_PIPELINE_ID} GLCIM_JOB_ID=${GLCIM_JOB_ID} GLCIM_JOB_NAME=${GLCIM_JOB_NAME} GLCIM_PROJECT=${GLCIM_PROJECT} ${BASH_SOURCE} tail-program"
+    tmux split-window "GLCIM_API_KEY=${GLCIM_API_KEY} GLCIM_HOSTNAME=${GLCIM_HOSTNAME} GLCIM_PIPELINE_ID=${GLCIM_PIPELINE_ID} GLCIM_JOB_ID=${GLCIM_JOB_ID} GLCIM_JOB_NAME=${GLCIM_JOB_NAME} GLCIM_PROJECT=${GLCIM_PROJECT} GLCIM_COOKIE=${GLCIM_COOKIE} ${BASH_SOURCE} tail-program"
 }
 
 "$@"

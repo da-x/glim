@@ -233,7 +233,6 @@ impl Thread {
                             .project(self.config.project.clone())
                             .pipeline(info.pipeline_id)
                             .scopes(vec![
-                                JobScope::Created,
                                 JobScope::Pending,
                                 JobScope::Running,
                                 JobScope::Failed,

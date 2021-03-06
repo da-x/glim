@@ -24,6 +24,8 @@ tail-program() {
     local dir=/tmp/$USER/tail/gitlab-ci-jobs
     local outfile=${dir}/${GLCIM_JOB_ID}
 
+    printf '\033]2;%s\033\\' "${GLCIM_PROJECT} - ${GLCIM_PIPELINE_ID} - job ${GLCIM_JOB_ID} - ${GLCIM_JOB_NAME}"
+
     mkdir -p ${dir}
     touch ${outfile}
 
@@ -39,7 +41,7 @@ tail-program() {
 }
 
 tmux-split() {
-    tmux split-window "GLCIM_API_KEY=${GLCIM_API_KEY} GLCIM_HOSTNAME=${GLCIM_HOSTNAME} GLCIM_PIPELINE_ID=${GLCIM_PIPELINE_ID} GLCIM_JOB_ID=${GLCIM_JOB_ID} GLCIM_PROJECT=${GLCIM_PROJECT} ${BASH_SOURCE} tail-program"
+    tmux split-window "GLCIM_API_KEY=${GLCIM_API_KEY} GLCIM_HOSTNAME=${GLCIM_HOSTNAME} GLCIM_PIPELINE_ID=${GLCIM_PIPELINE_ID} GLCIM_JOB_ID=${GLCIM_JOB_ID} GLCIM_JOB_NAME=${GLCIM_JOB_NAME} GLCIM_PROJECT=${GLCIM_PROJECT} ${BASH_SOURCE} tail-program"
 }
 
 "$@"

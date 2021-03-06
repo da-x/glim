@@ -95,8 +95,8 @@ struct ConfigHooks {
     ///
     /// The following environment variables will be defined:
     ///
-    /// $GLCIM_JOB_ID, $GLCIM_PIPELINE_ID, $GLCIM_HOSTNAME, $GLCIM_API_KEY,
-    /// $GLCIM_PROJECT
+    /// $GLCIM_JOB_ID, $GLCIM_JOB_NAME, $GLCIM_PIPELINE_ID, $GLCIM_HOSTNAME,
+    /// $GLCIM_API_KEY, $GLCIM_PROJECT
     open_job_command: Option<String>,
 }
 
@@ -111,7 +111,7 @@ struct Pipeline {
     updated_at: DateTime<Local>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 struct Job {
     id: u64,
     name: String,
@@ -331,7 +331,7 @@ struct Main {
     selected_job: tui::widgets::TableState,
     ignored_pipeline_ids: std::collections::HashSet<u64>,
     pipeline_ids: Vec<u64>,
-    job_ids: Vec<u64>,
+    jobs: Vec<Job>,
     config: Config,
     debug: bool,
     leave: bool,
@@ -405,7 +405,7 @@ impl Main {
             selected_job: Default::default(),
             ignored_pipeline_ids: Default::default(),
             pipeline_ids: vec![],
-            job_ids: vec![],
+            jobs: vec![],
             leave: false,
             tx_cmd: tx,
             config,
@@ -584,10 +584,10 @@ impl Main {
         let state = self.state.lock().unwrap();
 
         state.jobs.fix_selected(&mut self.selected_job, None);
-        let job_ids = &mut self.job_ids;
+        let printed_jobs = &mut self.jobs;
         let selected_job = &mut self.selected_job;
 
-        job_ids.clear();
+        printed_jobs.clear();
 
         self.terminal.draw(|rect| {
             use tui::{style::{Color, Modifier, Style}, text::Span};
@@ -596,7 +596,7 @@ impl Main {
             let mut items: Vec<_> = vec![];
             if let Some((_, jobs)) = &state.jobs.data {
                 for job in jobs.iter() {
-                    job_ids.push(job.id);
+                    printed_jobs.push((*job).clone());
                     let status = Span::styled(
                         &job.status,
                         Style::default().fg(match job.status.as_str() {
@@ -733,14 +733,15 @@ impl Main {
             CommandMode::Jobs(ref info) => {
                 if let Some(open_job_command) = &self.config.hooks.open_job_command {
                     if let Some(selected) = self.selected_job.selected() {
-                        if selected < self.job_ids.len() {
-                            let id = self.job_ids[selected];
+                        if selected < self.jobs.len() {
+                            let job = &self.jobs[selected];
                             let shell = std::env::var("SHELL")?;
                             let mut command =
                                 std::process::Command::new(shell);
                             command.arg("-c");
                             command.arg(open_job_command);
-                            command.env("GLCIM_JOB_ID", format!("{}", id));
+                            command.env("GLCIM_JOB_ID", format!("{}", job.id));
+                            command.env("GLCIM_JOB_NAME", format!("{}", job.name));
                             command.env("GLCIM_PIPELINE_ID", format!("{}",
                                 info.pipeline_id));
                             command.env("GLCIM_PROJECT", &self.config.project);

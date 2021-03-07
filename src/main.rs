@@ -823,11 +823,12 @@ impl Main {
                             command.arg("log");
                             command.arg(&pipeline.sha);
                             command.current_dir(&local_repo);
-
                             execute!(stdout(), Clear(ClearType::All))?;
+                            self.release_terminal()?;
                             if let Ok(mut v) = command.spawn() {
                                 let _ = v.wait();
                             }
+                            self.gain_terminal()?;
                             self.terminal.clear()?;
                         }
                     }
@@ -874,14 +875,29 @@ impl Main {
 
         Ok(())
     }
+
+    fn gain_terminal(&mut self) -> Result<(), Error> {
+        enable_raw_mode()?;
+        let mut stdout = stdout();
+        execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+        Ok(())
+    }
+
+    fn release_terminal(&mut self) -> Result<(), Error> {
+        disable_raw_mode()?;
+        execute!(
+            self.terminal.backend_mut(),
+            LeaveAlternateScreen,
+            DisableMouseCapture
+        )?;
+        self.terminal.show_cursor()?;
+        Ok(())
+    }
 }
 
 fn main_wrap() -> Result<(), Error> {
     let opt = CommandArgs::from_args();
     let mut glcim = Main::new(&opt)?;
-
-    if !opt.debug {
-    }
 
     let (mut glcim, v) = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -894,13 +910,7 @@ fn main_wrap() -> Result<(), Error> {
         });
 
     if !opt.debug {
-        disable_raw_mode()?;
-        execute!(
-            glcim.terminal.backend_mut(),
-            LeaveAlternateScreen,
-            DisableMouseCapture
-        )?;
-        glcim.terminal.show_cursor()?;
+        glcim.release_terminal()?;
     }
 
     v?;

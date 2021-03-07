@@ -11,7 +11,7 @@ use std::io::stdout;
 use crossterm::{
     event::{DisableMouseCapture, EnableMouseCapture, Event as CEvent, EventStream},
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{disable_raw_mode, enable_raw_mode, Clear, EnterAlternateScreen, LeaveAlternateScreen, ClearType},
 };
 use std::time::{Duration, Instant};
 use tui::Terminal;
@@ -88,6 +88,9 @@ struct Config {
     hostname: String,
     project: String,
 
+    /// Path to the local repository clone
+    local_repo: Option<PathBuf>,
+
     /// Webview session can be used for online job traces update
     cookie: Option<String>,
 
@@ -106,7 +109,7 @@ struct ConfigHooks {
     open_job_command: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct Pipeline {
     id: u64,
     status: String,
@@ -338,7 +341,7 @@ struct Main {
     selected_pipeline: tui::widgets::TableState,
     selected_job: tui::widgets::TableState,
     ignored_pipeline_ids: std::collections::HashSet<u64>,
-    pipeline_ids: Vec<u64>,
+    pipelines: Vec<Pipeline>,
     jobs: Vec<Job>,
     config: Config,
     debug: bool,
@@ -412,7 +415,7 @@ impl Main {
             selected_pipeline: Default::default(),
             selected_job: Default::default(),
             ignored_pipeline_ids: Default::default(),
-            pipeline_ids: vec![],
+            pipelines: vec![],
             jobs: vec![],
             leave: false,
             tx_cmd: tx,
@@ -491,9 +494,9 @@ impl Main {
         let state = self.state.lock().unwrap();
 
         state.pipelines.fix_selected(&mut self.selected_pipeline,
-            Some(self.pipeline_ids.len()));
+            Some(self.pipelines.len()));
         let selected_pipeline = &mut self.selected_pipeline;
-        let pipeline_ids = &mut self.pipeline_ids;
+        let pipeline_ids = &mut self.pipelines;
         let ignored_pipeline_ids = &self.ignored_pipeline_ids;
 
         self.terminal.draw(|rect| {
@@ -508,7 +511,7 @@ impl Main {
                         continue;
                     }
 
-                    pipeline_ids.push(pipeline.id);
+                    pipeline_ids.push((*pipeline).clone());
                     let user = if let Some(user) = state.pipeline_trigger.get(&pipeline.id) {
                         user
                     } else {
@@ -686,7 +689,7 @@ impl Main {
                 }
 
                 state.pipelines.fix_selected(&mut self.selected_pipeline,
-                    Some(self.pipeline_ids.len()));
+                    Some(self.pipelines.len()));
             }
         }
 
@@ -714,7 +717,7 @@ impl Main {
                 }
 
                 state.pipelines.fix_selected(&mut self.selected_pipeline,
-                    Some(self.pipeline_ids.len()));
+                    Some(self.pipelines.len()));
             }
         }
 
@@ -768,12 +771,12 @@ impl Main {
             }
             CommandMode::Pipelines(_) => {
                 if let Some(selected) = self.selected_pipeline.selected() {
-                    if selected < self.pipeline_ids.len() {
-                        let id = self.pipeline_ids[selected];
+                    if selected < self.pipelines.len() {
+                        let pipeline = &self.pipelines[selected];
                         self.selected_job.select(None);
                         self.prev_mode = Some(std::mem::replace(&mut self.mode,
                             CommandMode::Jobs(JobsMode {
-                                pipeline_id: id
+                                pipeline_id: pipeline.id
                             })
                         ));
                         let mut state = self.state.lock().unwrap();
@@ -793,11 +796,39 @@ impl Main {
             }
             CommandMode::Pipelines(_) => {
                 if let Some(selected) = self.selected_pipeline.selected() {
-                    if selected < self.pipeline_ids.len() {
-                        let id = self.pipeline_ids[selected];
-                        self.ignored_pipeline_ids.insert(id);
-                        if selected > 0 && selected + 1 == self.pipeline_ids.len() {
+                    if selected < self.pipelines.len() {
+                        let pipeline = &self.pipelines[selected];
+                        self.ignored_pipeline_ids.insert(pipeline.id);
+                        if selected > 0 && selected + 1 == self.pipelines.len() {
                             self.selected_pipeline.select(Some(selected - 1));
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn on_l_key(&mut self) -> Result<(), Error> {
+        match self.mode {
+            CommandMode::Jobs(_) => {
+            }
+            CommandMode::Pipelines(_) => {
+                if let Some(local_repo) = &self.config.local_repo {
+                    if let Some(selected) = self.selected_pipeline.selected() {
+                        if selected < self.pipelines.len() {
+                            let pipeline = &self.pipelines[selected];
+                            let mut command = std::process::Command::new("git");
+                            command.arg("log");
+                            command.arg(&pipeline.sha);
+                            command.current_dir(&local_repo);
+
+                            execute!(stdout(), Clear(ClearType::All))?;
+                            if let Ok(mut v) = command.spawn() {
+                                let _ = v.wait();
+                            }
+                            self.terminal.clear()?;
                         }
                     }
                 }
@@ -816,6 +847,9 @@ impl Main {
                     },
                     crossterm::event::KeyCode::Char('r') => {
                         self.ignored_pipeline_ids.clear();
+                    },
+                    crossterm::event::KeyCode::Char('l') => {
+                        self.on_l_key()?;
                     },
                     crossterm::event::KeyCode::Enter => {
                         self.on_enter()?;

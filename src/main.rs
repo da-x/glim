@@ -47,6 +47,9 @@ pub enum Error {
 struct PipelinesMode {
     #[structopt(name = "all", short="a")]
     all: bool,
+
+    #[structopt(name = "ref", short="r")]
+    r#ref: Option<String>,
 }
 
 #[derive(Debug, StructOpt, Clone)]
@@ -267,6 +270,9 @@ impl Thread {
                         endpoint.order_by(PipelineOrderBy::Id);
                         if !info.all {
                             endpoint.username(&self.current_user.username);
+                        }
+                        if let Some(r#ref) = &info.r#ref {
+                            endpoint.ref_(r#ref.to_owned());
                         }
                         let endpoint = endpoint.build().unwrap();
                         let endpoint = gitlab::api::paged(endpoint,

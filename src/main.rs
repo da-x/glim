@@ -724,6 +724,42 @@ impl Main {
         Ok(())
     }
 
+    fn on_home(&mut self) -> Result<(), Error> {
+        let state = self.state.lock().unwrap();
+
+        match self.mode {
+            CommandMode::Jobs(_) => {
+                self.selected_job.select(Some(0));
+                state.jobs.fix_selected(&mut self.selected_job, None)
+            }
+            CommandMode::Pipelines(_) => {
+                self.selected_pipeline.select(Some(0));
+                state.pipelines.fix_selected(&mut self.selected_pipeline,
+                    Some(self.pipelines.len()));
+            }
+        }
+
+        Ok(())
+    }
+
+    fn on_end(&mut self) -> Result<(), Error> {
+        let state = self.state.lock().unwrap();
+
+        match self.mode {
+            CommandMode::Jobs(_) => {
+                self.selected_job.select(Some(std::usize::MAX));
+                state.jobs.fix_selected(&mut self.selected_job, None)
+            }
+            CommandMode::Pipelines(_) => {
+                self.selected_pipeline.select(Some(std::usize::MAX));
+                state.pipelines.fix_selected(&mut self.selected_pipeline,
+                    Some(self.pipelines.len()));
+            }
+        }
+
+        Ok(())
+    }
+
     fn on_backspace(&mut self) -> Result<(), Error> {
         match self.mode {
             CommandMode::Jobs(_) => {
@@ -866,6 +902,22 @@ impl Main {
                     },
                     crossterm::event::KeyCode::Down => {
                         self.on_down()?;
+                    },
+                    crossterm::event::KeyCode::PageUp => {
+                        for _ in 0..crossterm::terminal::size()?.0.saturating_sub(2) {
+                            self.on_up()?;
+                        }
+                    },
+                    crossterm::event::KeyCode::PageDown => {
+                        for _ in 0..crossterm::terminal::size()?.0.saturating_sub(2) {
+                            self.on_down()?;
+                        }
+                    },
+                    crossterm::event::KeyCode::Home => {
+                        self.on_home()?;
+                    },
+                    crossterm::event::KeyCode::End => {
+                        self.on_end()?;
                     },
                     _ => { }
                 }

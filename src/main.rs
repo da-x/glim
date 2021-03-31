@@ -961,37 +961,52 @@ impl Main {
         Ok(())
     }
 
+    fn on_enter_job(&self, job: &Job, pipeline_id: u64) -> Result<(), Error> {
+        if let Some(open_job_command) = &self.config.hooks.open_job_command {
+            let shell = std::env::var("SHELL")?;
+            let mut command =
+                std::process::Command::new(shell);
+            command.arg("-c");
+            command.arg(open_job_command);
+            command.env("GLCIM_JOB_ID", format!("{}", job.id));
+            command.env("GLCIM_JOB_NAME", format!("{}", job.name));
+            command.env("GLCIM_PIPELINE_ID", format!("{}", pipeline_id));
+            command.env("GLCIM_PROJECT", &self.config.project);
+            command.env("GLCIM_HOSTNAME", &self.config.hostname);
+            command.env("GLCIM_API_KEY", &self.config.api_key);
+            if let Some(cookie) = &self.config.cookie {
+                command.env("GLCIM_COOKIE", &cookie);
+            }
+            if let Ok(mut v) = command.spawn() {
+                let _ = v.wait();
+            }
+        }
+
+        Ok(())
+    }
+
     fn on_enter(&mut self) -> Result<(), Error> {
         match self.mode {
             CommandMode::Jobs(ref info) => {
-                if let Some(open_job_command) = &self.config.hooks.open_job_command {
-                    if let Some(selected) = self.selected_job.selected() {
-                        if selected < self.jobs.len() {
-                            let job = &self.jobs[selected];
-                            let shell = std::env::var("SHELL")?;
-                            let mut command =
-                                std::process::Command::new(shell);
-                            command.arg("-c");
-                            command.arg(open_job_command);
-                            command.env("GLCIM_JOB_ID", format!("{}", job.id));
-                            command.env("GLCIM_JOB_NAME", format!("{}", job.name));
-                            command.env("GLCIM_PIPELINE_ID", format!("{}",
-                                info.pipeline_id));
-                            command.env("GLCIM_PROJECT", &self.config.project);
-                            command.env("GLCIM_HOSTNAME", &self.config.hostname);
-                            command.env("GLCIM_API_KEY", &self.config.api_key);
-                            if let Some(cookie) = &self.config.cookie {
-                                command.env("GLCIM_COOKIE", &cookie);
-                            }
-                            if let Ok(mut v) = command.spawn() {
-                                let _ = v.wait();
-                            }
-                            // TODO: report error
-                        }
+                if let Some(selected) = self.selected_job.selected() {
+                    if selected < self.jobs.len() {
+                        let job = &self.jobs[selected];
+                        self.on_enter_job(job, info.pipeline_id)?;
                     }
                 }
             }
-            CommandMode::PipeDiff{..} => { },
+            CommandMode::PipeDiff(ref info) => {
+                if let Some(selected) = self.selected_pipediff.selected() {
+                    if selected < self.pipediffs.len() {
+                        match &self.pipediffs[selected] {
+                            itertools::EitherOrBoth::Both(_, (_, b)) => {
+                                self.on_enter_job(&b, info.to)?;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            },
             CommandMode::Pipelines(_) => {
                 if let Some(selected) = self.selected_pipeline.selected() {
                     if selected < self.pipelines.len() {
@@ -1007,6 +1022,29 @@ impl Main {
                         let _ = self.tx_cmd.send(RxCmd::UpdateMode(self.mode.clone()));
                     }
                 }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn on_p_key(&mut self) -> Result<(), Error> {
+        match self.mode {
+            CommandMode::Jobs(_) => {
+            }
+            CommandMode::PipeDiff(ref info) => {
+                if let Some(selected) = self.selected_pipediff.selected() {
+                    if selected < self.pipediffs.len() {
+                        match &self.pipediffs[selected] {
+                            itertools::EitherOrBoth::Both((_, a), _) => {
+                                self.on_enter_job(&a, info.from)?;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            },
+            CommandMode::Pipelines(_) => {
             }
         }
 
@@ -1079,6 +1117,9 @@ impl Main {
                     },
                     crossterm::event::KeyCode::Char('l') => {
                         self.on_l_key()?;
+                    },
+                    crossterm::event::KeyCode::Char('p') => {
+                        self.on_p_key()?;
                     },
                     crossterm::event::KeyCode::Enter => {
                         self.on_enter()?;

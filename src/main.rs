@@ -202,6 +202,37 @@ impl<T> Updatable<Vec<T>> {
         }
     }
 
+    fn up(&self, s: &mut tui::widgets::TableState, visible: Option<usize>) {
+        if let Some(selected) = s.selected() {
+            if selected > 0 {
+                s.select(Some(selected - 1));
+            }
+        } else {
+            s.select(Some(0));
+        }
+
+        self.fix_selected(s, visible)
+    }
+
+    fn down(&self, s: &mut tui::widgets::TableState, visible: Option<usize>) {
+        if let Some(selected) = s.selected() {
+            s.select(Some(selected + 1));
+        } else {
+            s.select(Some(0));
+        }
+
+        self.fix_selected(s, visible)
+    }
+
+    fn home(&self, s: &mut tui::widgets::TableState, visible: Option<usize>) {
+        s.select(Some(0));
+        self.fix_selected(s, visible)
+    }
+
+    fn end(&self, s: &mut tui::widgets::TableState, visible: Option<usize>) {
+        s.select(Some(std::usize::MAX));
+        self.fix_selected(s, visible)
+    }
 }
 
 #[derive(Default)]
@@ -753,30 +784,9 @@ impl Main {
         let state = self.state.lock().unwrap();
 
         match self.mode {
-            CommandMode::Jobs(_) => {
-                if let Some(selected) = self.selected_job.selected() {
-                    if selected > 0 {
-                        self.selected_job.select(Some(selected - 1));
-                    }
-                } else {
-                    self.selected_job.select(Some(0));
-                }
-
-                state.jobs.fix_selected(&mut self.selected_job, None)
-            }
+            CommandMode::Jobs(_) => state.jobs.up(&mut self.selected_job, None),
+            CommandMode::Pipelines(_) => state.pipelines.up(&mut self.selected_pipeline, None),
             CommandMode::PipeDiff{..} => { },
-            CommandMode::Pipelines(_) => {
-                if let Some(selected) = self.selected_pipeline.selected() {
-                    if selected > 0 {
-                        self.selected_pipeline.select(Some(selected - 1));
-                    }
-                } else {
-                    self.selected_pipeline.select(Some(0));
-                }
-
-                state.pipelines.fix_selected(&mut self.selected_pipeline,
-                    Some(self.pipelines.len()));
-            }
         }
 
         Ok(())
@@ -786,26 +796,9 @@ impl Main {
         let state = self.state.lock().unwrap();
 
         match self.mode {
-            CommandMode::Jobs(_) => {
-                if let Some(selected) = self.selected_job.selected() {
-                    self.selected_job.select(Some(selected + 1));
-                } else {
-                    self.selected_job.select(Some(0));
-                }
-
-                state.jobs.fix_selected(&mut self.selected_job, None)
-            }
+            CommandMode::Jobs(_) => state.jobs.down(&mut self.selected_job, None),
+            CommandMode::Pipelines(_) => state.pipelines.down(&mut self.selected_job, None),
             CommandMode::PipeDiff{..} => { },
-            CommandMode::Pipelines(_) => {
-                if let Some(selected) = self.selected_pipeline.selected() {
-                    self.selected_pipeline.select(Some(selected + 1));
-                } else {
-                    self.selected_pipeline.select(Some(0));
-                }
-
-                state.pipelines.fix_selected(&mut self.selected_pipeline,
-                    Some(self.pipelines.len()));
-            }
         }
 
         Ok(())
@@ -815,16 +808,9 @@ impl Main {
         let state = self.state.lock().unwrap();
 
         match self.mode {
-            CommandMode::Jobs(_) => {
-                self.selected_job.select(Some(0));
-                state.jobs.fix_selected(&mut self.selected_job, None)
-            }
+            CommandMode::Jobs(_) => state.jobs.home(&mut self.selected_job, None),
+            CommandMode::Pipelines(_) => state.pipelines.home(&mut self.selected_job, None),
             CommandMode::PipeDiff{..} => { },
-            CommandMode::Pipelines(_) => {
-                self.selected_pipeline.select(Some(0));
-                state.pipelines.fix_selected(&mut self.selected_pipeline,
-                    Some(self.pipelines.len()));
-            }
         }
 
         Ok(())
@@ -834,16 +820,9 @@ impl Main {
         let state = self.state.lock().unwrap();
 
         match self.mode {
-            CommandMode::Jobs(_) => {
-                self.selected_job.select(Some(std::usize::MAX));
-                state.jobs.fix_selected(&mut self.selected_job, None)
-            }
+            CommandMode::Jobs(_) => state.jobs.end(&mut self.selected_job, None),
+            CommandMode::Pipelines(_) => state.pipelines.end(&mut self.selected_job, None),
             CommandMode::PipeDiff{..} => { },
-            CommandMode::Pipelines(_) => {
-                self.selected_pipeline.select(Some(std::usize::MAX));
-                state.pipelines.fix_selected(&mut self.selected_pipeline,
-                    Some(self.pipelines.len()));
-            }
         }
 
         Ok(())
@@ -858,8 +837,7 @@ impl Main {
                 }
             }
             CommandMode::PipeDiff{..} => { },
-            CommandMode::Pipelines(_) => {
-            }
+            CommandMode::Pipelines(_) => { },
         }
 
         Ok(())

@@ -17,3 +17,4 @@ crossterm = { version = "0.19", features = ["event-stream"] }
 futures = "0.3"
 futures-timer = "2"
 tokio = {version = "1", features = ["rt", "process", "io-util", "rt-multi-thread"]}
+itertools = "*"

@@ -635,6 +635,7 @@ dependencies = [
  "futures",
  "futures-timer",
  "gitlab",
+ "itertools",
  "serde 1.0.123",
  "structopt",
  "thiserror",

@@ -59,10 +59,23 @@ struct JobsMode {
 }
 
 #[derive(Debug, StructOpt, Clone)]
+struct PipeDiff {
+    #[structopt(name = "from")]
+    from: u64,
+
+    #[structopt(name = "to")]
+    to: u64,
+}
+
+#[derive(Debug, StructOpt, Clone)]
 enum CommandMode {
     /// Show all pipelines for a project, or specific to current user
     #[structopt(name = "pipelines")]
     Pipelines(PipelinesMode),
+
+    /// Show difference between two pipes
+    #[structopt(name = "pipe-diff")]
+    PipeDiff(PipeDiff),
 
     /// Show all jobs related to a given pipeline
     #[structopt(name = "jobs")]
@@ -266,6 +279,7 @@ impl Thread {
                         }
                     }
                 }
+                CommandMode::PipeDiff{..} => { },
                 CommandMode::Pipelines(info) => {
                     if self.state.lock().unwrap().pipelines.update {
                         let mut endpoint = projects::pipelines::Pipelines::builder();
@@ -343,6 +357,7 @@ struct Main {
     ignored_pipeline_ids: std::collections::HashSet<u64>,
     pipelines: Vec<Pipeline>,
     jobs: Vec<Job>,
+    client: Option<Gitlab>,
     config: Config,
     debug: bool,
     leave: bool,
@@ -386,18 +401,30 @@ impl Main {
         let command = opt.command.clone();
 
         let debug = opt.debug;
-        std::thread::spawn(move || {
-            Thread {
-                config: config2,
-                gitlab: client,
-                state: state2,
-                rx_cmd: rx,
-                rsp_sender,
-                current_user,
-                debug,
-                mode: command
-            }.run();
-        });
+
+        let query = match command {
+            CommandMode::PipeDiff{..} => false,
+            CommandMode::Pipelines{..} => true,
+            CommandMode::Jobs{..} => true,
+        };
+
+        let client = if query {
+            std::thread::spawn(move || {
+                Thread {
+                    config: config2,
+                    gitlab: client,
+                    state: state2,
+                    rx_cmd: rx,
+                    rsp_sender,
+                    current_user,
+                    debug,
+                    mode: command
+                }.run();
+            });
+            None
+        } else {
+            Some(client)
+        };
 
         if !opt.debug {
             enable_raw_mode()?;
@@ -420,6 +447,7 @@ impl Main {
             leave: false,
             tx_cmd: tx,
             config,
+            client,
             debug: opt.debug,
             prev_mode: None,
             mode: opt.command.clone(),
@@ -436,6 +464,7 @@ impl Main {
                 let mut state = self.state.lock().unwrap();
                 let mut updates = 0;
                 match self.mode {
+                    CommandMode::PipeDiff{..} => { },
                     CommandMode::Pipelines{..} => {
                         if state.pipelines.check_expiry(std::time::Duration::from_millis(10000)) {
                             updates += 1;
@@ -485,9 +514,65 @@ impl Main {
 
     fn draw(&mut self) -> Result<(), Error> {
         match self.mode {
+            CommandMode::PipeDiff{..} => panic!(),
             CommandMode::Pipelines{..} => self.draw_pipelines(),
             CommandMode::Jobs{..} => self.draw_jobs(),
         }
+    }
+
+    fn query(&mut self, client: Gitlab) -> Result<(), Error> {
+        match &self.mode {
+            CommandMode::PipeDiff(info) => {
+                let info = info.clone();
+                return self.pipe_diff(info, client);
+            }
+            _ => {}
+        };
+
+        Ok(())
+    }
+
+    fn pipe_diff(&mut self, pipe_diff: PipeDiff, gitlab: Gitlab) -> Result<(), Error> {
+        let get_jobs = &|num| {
+            let endpoint =
+                projects::pipelines::PipelineJobs::builder()
+                .project(self.config.project.clone())
+                .pipeline(num)
+                .scopes(vec![
+                    JobScope::Pending,
+                    JobScope::Running,
+                    JobScope::Failed,
+                    JobScope::Success,
+                    JobScope::Canceled,
+                ].into_iter())
+                .build().unwrap();
+            let endpoint = gitlab::api::paged(endpoint,
+                gitlab::api::Pagination::Limit(300));
+            let jobs : Vec<Job> = endpoint.query(&gitlab).unwrap();
+            let mut map = std::collections::BTreeMap::new();
+            for job in jobs.into_iter() {
+                map.insert(job.name.clone(), job);
+            }
+            map
+        };
+
+        let from = get_jobs(pipe_diff.from);
+        let to = get_jobs(pipe_diff.to);
+
+        for res in itertools::merge_join_by(from, to, |(k1, _), (k2, _)|
+            Ord::cmp(k1, k2)
+        ) {
+            match res {
+                itertools::EitherOrBoth::Both((k, a), (_, b)) => {
+                    if a.status != b.status {
+                        println!("{:width$}: {} -> {}", k, a.status, b.status, width=40);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        Ok(())
     }
 
     fn draw_pipelines(&mut self) -> Result<(), Error> {
@@ -679,6 +764,7 @@ impl Main {
 
                 state.jobs.fix_selected(&mut self.selected_job, None)
             }
+            CommandMode::PipeDiff{..} => { },
             CommandMode::Pipelines(_) => {
                 if let Some(selected) = self.selected_pipeline.selected() {
                     if selected > 0 {
@@ -709,6 +795,7 @@ impl Main {
 
                 state.jobs.fix_selected(&mut self.selected_job, None)
             }
+            CommandMode::PipeDiff{..} => { },
             CommandMode::Pipelines(_) => {
                 if let Some(selected) = self.selected_pipeline.selected() {
                     self.selected_pipeline.select(Some(selected + 1));
@@ -732,6 +819,7 @@ impl Main {
                 self.selected_job.select(Some(0));
                 state.jobs.fix_selected(&mut self.selected_job, None)
             }
+            CommandMode::PipeDiff{..} => { },
             CommandMode::Pipelines(_) => {
                 self.selected_pipeline.select(Some(0));
                 state.pipelines.fix_selected(&mut self.selected_pipeline,
@@ -750,6 +838,7 @@ impl Main {
                 self.selected_job.select(Some(std::usize::MAX));
                 state.jobs.fix_selected(&mut self.selected_job, None)
             }
+            CommandMode::PipeDiff{..} => { },
             CommandMode::Pipelines(_) => {
                 self.selected_pipeline.select(Some(std::usize::MAX));
                 state.pipelines.fix_selected(&mut self.selected_pipeline,
@@ -768,6 +857,7 @@ impl Main {
                     let _ = self.tx_cmd.send(RxCmd::UpdateMode(self.mode.clone()));
                 }
             }
+            CommandMode::PipeDiff{..} => { },
             CommandMode::Pipelines(_) => {
             }
         }
@@ -805,6 +895,7 @@ impl Main {
                     }
                 }
             }
+            CommandMode::PipeDiff{..} => { },
             CommandMode::Pipelines(_) => {
                 if let Some(selected) = self.selected_pipeline.selected() {
                     if selected < self.pipelines.len() {
@@ -830,6 +921,7 @@ impl Main {
         match self.mode {
             CommandMode::Jobs(_) => {
             }
+            CommandMode::PipeDiff{..} => { },
             CommandMode::Pipelines(_) => {
                 if let Some(selected) = self.selected_pipeline.selected() {
                     if selected < self.pipelines.len() {
@@ -850,6 +942,7 @@ impl Main {
         match self.mode {
             CommandMode::Jobs(_) => {
             }
+            CommandMode::PipeDiff{..} => { },
             CommandMode::Pipelines(_) => {
                 if let Some(local_repo) = &self.config.local_repo {
                     if let Some(selected) = self.selected_pipeline.selected() {
@@ -950,6 +1043,12 @@ impl Main {
 fn main_wrap() -> Result<(), Error> {
     let opt = CommandArgs::from_args();
     let mut glcim = Main::new(&opt)?;
+
+    if let Some(client) = glcim.client.take() {
+        glcim.release_terminal()?;
+        glcim.query(client)?;
+        return Ok(());
+    }
 
     let (mut glcim, v) = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

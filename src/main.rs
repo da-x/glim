@@ -832,13 +832,13 @@ impl Main {
             let mut items: Vec<_> = vec![];
             if let Some((_, pipediff)) = &state.pipediff.data {
                 for pipediff in pipediff.iter() {
-                    printed_pipediffs.push((*pipediff).clone());
                     match pipediff {
                         itertools::EitherOrBoth::Both((k, a), (_, b)) => {
                             if pipediff_hide_unchanged && &a.status == &b.status {
                                 continue;
                             }
 
+                            printed_pipediffs.push((*pipediff).clone());
                             items.push(Row::new(vec![
                                     Cell::from(Span::raw(k.to_string())),
                                     Cell::from(Span::raw(a.id.to_string())),

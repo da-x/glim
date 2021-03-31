@@ -91,6 +91,10 @@ struct CommandArgs {
     #[structopt(name = "debug", short="d")]
     debug: bool,
 
+    /// Request debug mode - no TUI
+    #[structopt(name = "non-interactive", short="n")]
+    non_interactive: bool,
+
     #[structopt(subcommand)]
     command: CommandMode,
 }
@@ -138,6 +142,23 @@ struct Job {
     id: u64,
     name: String,
     status: String,
+}
+
+use tui::{style::{Color, Style}, text::Span};
+
+impl Job {
+    fn styled_status(&self) -> Span {
+        Span::styled(
+            &self.status,
+            Style::default().fg(match self.status.as_str() {
+                "failed" => Color::Red,
+                "running" => Color::Cyan,
+                "success" => Color::Green,
+                "canceled" => Color::Gray,
+                _ => Color::White,
+            }),
+        )
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -235,11 +256,14 @@ impl<T> Updatable<Vec<T>> {
     }
 }
 
+type JobDiff = itertools::EitherOrBoth<(String, Job), (String, Job)>;
+
 #[derive(Default)]
 struct State {
     request_count: u64,
     pipelines: Updatable<Vec<Pipeline>>,
     jobs: Updatable<Vec<Job>>,
+    pipediff: Updatable<Vec<JobDiff>>,
     pipeline_trigger: std::collections::HashMap<u64, String>,
 }
 
@@ -310,7 +334,47 @@ impl Thread {
                         }
                     }
                 }
-                CommandMode::PipeDiff{..} => { },
+                CommandMode::PipeDiff(pipediff) => {
+                    if self.state.lock().unwrap().pipediff.update {
+                        let get_jobs = &|num| {
+                            let endpoint =
+                                projects::pipelines::PipelineJobs::builder()
+                                .project(self.config.project.clone())
+                                .pipeline(num)
+                                .scopes(vec![
+                                    JobScope::Pending,
+                                    JobScope::Running,
+                                    JobScope::Failed,
+                                    JobScope::Success,
+                                    JobScope::Canceled,
+                                ].into_iter())
+                                .build().unwrap();
+                            let endpoint = gitlab::api::paged(endpoint,
+                                gitlab::api::Pagination::Limit(300));
+                            let jobs : Vec<Job> = endpoint.query(&self.gitlab).unwrap();
+                            let mut map = std::collections::BTreeMap::new();
+                            for job in jobs.into_iter() {
+                                map.insert(job.name.clone(), job);
+                            }
+                            map
+                        };
+
+                        let from = get_jobs(pipediff.from);
+                        let to = get_jobs(pipediff.to);
+                        let v : Vec<itertools::EitherOrBoth<(String, Job), (String, Job)>> =
+                            itertools::merge_join_by(from, to, |(k1, _), (k2, _)|
+                                Ord::cmp(k1, k2)
+                            ).collect();
+
+                        let mut state = self.state.lock().unwrap();
+                        if state.pipediff.update {
+                            state.pipediff.data = Some((Instant::now(), v));
+                            state.request_count += 1;
+                            updates += 1;
+                            state.pipediff.updated();
+                        }
+                    }
+                },
                 CommandMode::Pipelines(info) => {
                     if self.state.lock().unwrap().pipelines.update {
                         let mut endpoint = projects::pipelines::Pipelines::builder();
@@ -385,13 +449,16 @@ struct Main {
     mode: CommandMode,
     selected_pipeline: tui::widgets::TableState,
     selected_job: tui::widgets::TableState,
+    selected_pipediff: tui::widgets::TableState,
     ignored_pipeline_ids: std::collections::HashSet<u64>,
     pipelines: Vec<Pipeline>,
     jobs: Vec<Job>,
-    client: Option<Gitlab>,
+    pipediffs: Vec<JobDiff>,
     config: Config,
     debug: bool,
     leave: bool,
+    pipediff_hide_unchanged: bool,
+    non_interactive: bool,
 }
 
 impl Main {
@@ -433,35 +500,24 @@ impl Main {
 
         let debug = opt.debug;
 
-        let query = match command {
-            CommandMode::PipeDiff{..} => false,
-            CommandMode::Pipelines{..} => true,
-            CommandMode::Jobs{..} => true,
-        };
+        std::thread::spawn(move || {
+            Thread {
+                config: config2,
+                gitlab: client,
+                state: state2,
+                rx_cmd: rx,
+                rsp_sender,
+                current_user,
+                debug,
+                mode: command
+            }.run();
+        });
 
-        let client = if query {
-            std::thread::spawn(move || {
-                Thread {
-                    config: config2,
-                    gitlab: client,
-                    state: state2,
-                    rx_cmd: rx,
-                    rsp_sender,
-                    current_user,
-                    debug,
-                    mode: command
-                }.run();
-            });
-            None
-        } else {
-            Some(client)
-        };
-
-        if !opt.debug {
+        if !opt.debug && !opt.non_interactive {
             enable_raw_mode()?;
         }
         let mut stdout = stdout();
-        if !opt.debug {
+        if !opt.debug && !opt.non_interactive {
             execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
         }
         let backend = CrosstermBackend::new(stdout);
@@ -472,14 +528,17 @@ impl Main {
             state,
             selected_pipeline: Default::default(),
             selected_job: Default::default(),
+            selected_pipediff: Default::default(),
             ignored_pipeline_ids: Default::default(),
             pipelines: vec![],
             jobs: vec![],
+            pipediffs: vec![],
             leave: false,
+            non_interactive: opt.non_interactive,
             tx_cmd: tx,
             config,
-            client,
             debug: opt.debug,
+            pipediff_hide_unchanged: true,
             prev_mode: None,
             mode: opt.command.clone(),
             rsp_recv: Some(rsp_recv),
@@ -495,7 +554,6 @@ impl Main {
                 let mut state = self.state.lock().unwrap();
                 let mut updates = 0;
                 match self.mode {
-                    CommandMode::PipeDiff{..} => { },
                     CommandMode::Pipelines{..} => {
                         if state.pipelines.check_expiry(std::time::Duration::from_millis(10000)) {
                             updates += 1;
@@ -503,6 +561,11 @@ impl Main {
                     },
                     CommandMode::Jobs{..} => {
                         if state.jobs.check_expiry(std::time::Duration::from_millis(10000)) {
+                            updates += 1;
+                        }
+                    },
+                    CommandMode::PipeDiff{..} => {
+                        if state.pipediff.check_expiry(std::time::Duration::from_millis(60000)) {
                             updates += 1;
                         }
                     },
@@ -514,7 +577,13 @@ impl Main {
             }
 
             if !self.debug {
-                self.draw()?;
+                if !self.non_interactive {
+                    self.draw()?;
+                } else {
+                    if self.check_report_non_interactive()? {
+                        break;
+                    }
+                }
             }
 
             let delay = Delay::new(Duration::from_millis(1000));
@@ -545,65 +614,41 @@ impl Main {
 
     fn draw(&mut self) -> Result<(), Error> {
         match self.mode {
-            CommandMode::PipeDiff{..} => panic!(),
+            CommandMode::PipeDiff{..} => self.draw_pipediff(),
             CommandMode::Pipelines{..} => self.draw_pipelines(),
             CommandMode::Jobs{..} => self.draw_jobs(),
         }
     }
 
-    fn query(&mut self, client: Gitlab) -> Result<(), Error> {
+    fn check_report_non_interactive(&mut self) -> Result<bool, Error> {
         match &self.mode {
-            CommandMode::PipeDiff(info) => {
-                let info = info.clone();
-                return self.pipe_diff(info, client);
+            CommandMode::PipeDiff{..} => {
+                return self.non_interactive_pipediff();
             }
             _ => {}
         };
 
-        Ok(())
+        Ok(false)
     }
 
-    fn pipe_diff(&mut self, pipe_diff: PipeDiff, gitlab: Gitlab) -> Result<(), Error> {
-        let get_jobs = &|num| {
-            let endpoint =
-                projects::pipelines::PipelineJobs::builder()
-                .project(self.config.project.clone())
-                .pipeline(num)
-                .scopes(vec![
-                    JobScope::Pending,
-                    JobScope::Running,
-                    JobScope::Failed,
-                    JobScope::Success,
-                    JobScope::Canceled,
-                ].into_iter())
-                .build().unwrap();
-            let endpoint = gitlab::api::paged(endpoint,
-                gitlab::api::Pagination::Limit(300));
-            let jobs : Vec<Job> = endpoint.query(&gitlab).unwrap();
-            let mut map = std::collections::BTreeMap::new();
-            for job in jobs.into_iter() {
-                map.insert(job.name.clone(), job);
-            }
-            map
-        };
+    fn non_interactive_pipediff(&mut self) -> Result<bool, Error> {
+        let state = self.state.lock().unwrap();
 
-        let from = get_jobs(pipe_diff.from);
-        let to = get_jobs(pipe_diff.to);
-
-        for res in itertools::merge_join_by(from, to, |(k1, _), (k2, _)|
-            Ord::cmp(k1, k2)
-        ) {
-            match res {
-                itertools::EitherOrBoth::Both((k, a), (_, b)) => {
-                    if a.status != b.status {
-                        println!("{:width$}: {} -> {}", k, a.status, b.status, width=40);
+        if let Some((_, pipediff)) = &state.pipediff.data {
+            for res in pipediff.iter() {
+                match res {
+                    itertools::EitherOrBoth::Both((k, a), (_, b)) => {
+                        if a.status != b.status {
+                            println!("{:width$}: {} -> {}", k, a.status, b.status, width=40);
+                        }
                     }
+                    _ => {}
                 }
-                _ => {}
             }
+            return Ok(true);
         }
 
-        Ok(())
+        Ok(false)
     }
 
     fn draw_pipelines(&mut self) -> Result<(), Error> {
@@ -616,7 +661,7 @@ impl Main {
         let ignored_pipeline_ids = &self.ignored_pipeline_ids;
 
         self.terminal.draw(|rect| {
-            use tui::{style::{Color, Modifier, Style}, text::Span};
+            use tui::style::Modifier;
             use tui::widgets::{Table, Cell, Row, BorderType};
 
             let mut items: Vec<_> = vec![];
@@ -717,24 +762,14 @@ impl Main {
         printed_jobs.clear();
 
         self.terminal.draw(|rect| {
-            use tui::{style::{Color, Modifier, Style}, text::Span};
+            use tui::style::Modifier;
             use tui::widgets::{Table, Cell, Row, BorderType};
 
             let mut items: Vec<_> = vec![];
             if let Some((_, jobs)) = &state.jobs.data {
                 for job in jobs.iter() {
                     printed_jobs.push((*job).clone());
-                    let status = Span::styled(
-                        &job.status,
-                        Style::default().fg(match job.status.as_str() {
-                            "failed" => Color::Red,
-                            "running" => Color::Cyan,
-                            "success" => Color::Green,
-                            "canceled" => Color::Gray,
-                            _ => Color::White,
-                        }),
-                    );
-
+                    let status = job.styled_status();
                     items.push(Row::new(vec![
                         Cell::from(Span::raw(job.id.to_string())),
                         Cell::from(status),
@@ -780,13 +815,96 @@ impl Main {
         Ok(())
     }
 
+    fn draw_pipediff(&mut self) -> Result<(), Error> {
+        let state = self.state.lock().unwrap();
+
+        state.pipediff.fix_selected(&mut self.selected_job, None);
+        let printed_pipediffs = &mut self.pipediffs;
+        let selected_pipediff = &mut self.selected_pipediff;
+
+        printed_pipediffs.clear();
+
+        let pipediff_hide_unchanged = self.pipediff_hide_unchanged;
+        self.terminal.draw(|rect| {
+            use tui::style::Modifier;
+            use tui::widgets::{Table, Cell, Row, BorderType};
+
+            let mut items: Vec<_> = vec![];
+            if let Some((_, pipediff)) = &state.pipediff.data {
+                for pipediff in pipediff.iter() {
+                    printed_pipediffs.push((*pipediff).clone());
+                    match pipediff {
+                        itertools::EitherOrBoth::Both((k, a), (_, b)) => {
+                            if pipediff_hide_unchanged && &a.status == &b.status {
+                                continue;
+                            }
+
+                            items.push(Row::new(vec![
+                                    Cell::from(Span::raw(k.to_string())),
+                                    Cell::from(Span::raw(a.id.to_string())),
+                                    Cell::from(Span::raw(b.id.to_string())),
+                                    Cell::from(a.styled_status()),
+                                    Cell::from(b.styled_status()),
+                            ]));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            let pipediffs = Table::new(items)
+            .header(Row::new(vec![
+                Cell::from(Span::styled(
+                    "Name",
+                    Style::default().add_modifier(Modifier::BOLD),
+                )),
+                Cell::from(Span::styled(
+                    "Old ID",
+                    Style::default().add_modifier(Modifier::BOLD),
+                )),
+                Cell::from(Span::styled(
+                    "New ID",
+                    Style::default().add_modifier(Modifier::BOLD),
+                )),
+                Cell::from(Span::styled(
+                    "Old Status",
+                    Style::default().add_modifier(Modifier::BOLD),
+                )),
+                Cell::from(Span::styled(
+                    "New Status",
+                    Style::default().add_modifier(Modifier::BOLD),
+                )),
+            ]))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .style(Style::default().fg(Color::White))
+                    .title("Jobs")
+                    .border_type(BorderType::Plain),
+            )
+            .highlight_style(
+                Style::default().bg(Color::Rgb(60, 60, 80))
+            )
+            .widths(&[
+                Constraint::Length(40),
+                Constraint::Length(12),
+                Constraint::Length(12),
+                Constraint::Length(10),
+                Constraint::Length(10),
+            ]);
+
+            rect.render_stateful_widget(pipediffs, rect.size(), selected_pipediff);
+        })?;
+
+        Ok(())
+    }
     fn on_up(&mut self) -> Result<(), Error> {
         let state = self.state.lock().unwrap();
 
         match self.mode {
             CommandMode::Jobs(_) => state.jobs.up(&mut self.selected_job, None),
             CommandMode::Pipelines(_) => state.pipelines.up(&mut self.selected_pipeline, None),
-            CommandMode::PipeDiff{..} => { },
+            CommandMode::PipeDiff{..} => state.pipediff.up(&mut self.selected_pipediff, None),
         }
 
         Ok(())
@@ -796,9 +914,9 @@ impl Main {
         let state = self.state.lock().unwrap();
 
         match self.mode {
-            CommandMode::Jobs(_) => state.jobs.down(&mut self.selected_job, None),
-            CommandMode::Pipelines(_) => state.pipelines.down(&mut self.selected_job, None),
-            CommandMode::PipeDiff{..} => { },
+            CommandMode::Jobs(_) => state.jobs.down(&mut self.selected_job, Some(self.jobs.len())),
+            CommandMode::Pipelines(_) => state.pipelines.down(&mut self.selected_job, Some(self.pipelines.len())),
+            CommandMode::PipeDiff{..} => state.pipediff.down(&mut self.selected_pipediff, Some(self.pipediffs.len())),
         }
 
         Ok(())
@@ -810,7 +928,7 @@ impl Main {
         match self.mode {
             CommandMode::Jobs(_) => state.jobs.home(&mut self.selected_job, None),
             CommandMode::Pipelines(_) => state.pipelines.home(&mut self.selected_job, None),
-            CommandMode::PipeDiff{..} => { },
+            CommandMode::PipeDiff{..} => state.pipediff.home(&mut self.selected_pipediff, None),
         }
 
         Ok(())
@@ -820,9 +938,9 @@ impl Main {
         let state = self.state.lock().unwrap();
 
         match self.mode {
-            CommandMode::Jobs(_) => state.jobs.end(&mut self.selected_job, None),
-            CommandMode::Pipelines(_) => state.pipelines.end(&mut self.selected_job, None),
-            CommandMode::PipeDiff{..} => { },
+            CommandMode::Jobs(_) => state.jobs.end(&mut self.selected_job, Some(self.jobs.len())),
+            CommandMode::Pipelines(_) => state.pipelines.end(&mut self.selected_job, Some(self.pipelines.len())),
+            CommandMode::PipeDiff{..} => state.pipediff.end(&mut self.selected_pipediff, Some(self.pipediffs.len())),
         }
 
         Ok(())
@@ -956,6 +1074,9 @@ impl Main {
                     crossterm::event::KeyCode::Char('r') => {
                         self.ignored_pipeline_ids.clear();
                     },
+                    crossterm::event::KeyCode::Char('h') => {
+                        self.pipediff_hide_unchanged = !self.pipediff_hide_unchanged;
+                    },
                     crossterm::event::KeyCode::Char('l') => {
                         self.on_l_key()?;
                     },
@@ -1022,12 +1143,6 @@ fn main_wrap() -> Result<(), Error> {
     let opt = CommandArgs::from_args();
     let mut glcim = Main::new(&opt)?;
 
-    if let Some(client) = glcim.client.take() {
-        glcim.release_terminal()?;
-        glcim.query(client)?;
-        return Ok(());
-    }
-
     let (mut glcim, v) = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .worker_threads(3)
@@ -1038,7 +1153,7 @@ fn main_wrap() -> Result<(), Error> {
             (glcim, v)
         });
 
-    if !opt.debug {
+    if !opt.debug && !opt.non_interactive {
         glcim.release_terminal()?;
     }
 

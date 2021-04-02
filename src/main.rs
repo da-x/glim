@@ -1137,12 +1137,12 @@ impl Main {
                         self.on_down()?;
                     },
                     crossterm::event::KeyCode::PageUp => {
-                        for _ in 0..crossterm::terminal::size()?.0.saturating_sub(2) {
+                        for _ in 0..crossterm::terminal::size()?.1.saturating_sub(2) {
                             self.on_up()?;
                         }
                     },
                     crossterm::event::KeyCode::PageDown => {
-                        for _ in 0..crossterm::terminal::size()?.0.saturating_sub(2) {
+                        for _ in 0..crossterm::terminal::size()?.1.saturating_sub(2) {
                             self.on_down()?;
                         }
                     },

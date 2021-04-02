@@ -915,7 +915,7 @@ impl Main {
 
         match self.mode {
             CommandMode::Jobs(_) => state.jobs.down(&mut self.selected_job, Some(self.jobs.len())),
-            CommandMode::Pipelines(_) => state.pipelines.down(&mut self.selected_job, Some(self.pipelines.len())),
+            CommandMode::Pipelines(_) => state.pipelines.down(&mut self.selected_pipeline, Some(self.pipelines.len())),
             CommandMode::PipeDiff{..} => state.pipediff.down(&mut self.selected_pipediff, Some(self.pipediffs.len())),
         }
 
@@ -927,7 +927,7 @@ impl Main {
 
         match self.mode {
             CommandMode::Jobs(_) => state.jobs.home(&mut self.selected_job, None),
-            CommandMode::Pipelines(_) => state.pipelines.home(&mut self.selected_job, None),
+            CommandMode::Pipelines(_) => state.pipelines.home(&mut self.selected_pipeline, None),
             CommandMode::PipeDiff{..} => state.pipediff.home(&mut self.selected_pipediff, None),
         }
 
@@ -939,7 +939,7 @@ impl Main {
 
         match self.mode {
             CommandMode::Jobs(_) => state.jobs.end(&mut self.selected_job, Some(self.jobs.len())),
-            CommandMode::Pipelines(_) => state.pipelines.end(&mut self.selected_job, Some(self.pipelines.len())),
+            CommandMode::Pipelines(_) => state.pipelines.end(&mut self.selected_pipeline, Some(self.pipelines.len())),
             CommandMode::PipeDiff{..} => state.pipediff.end(&mut self.selected_pipediff, Some(self.pipediffs.len())),
         }
 

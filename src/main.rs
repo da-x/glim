@@ -1028,6 +1028,53 @@ impl Main {
         Ok(())
     }
 
+    fn on_job_open_in_browser(&self, job_id: u64) -> Result<(), Error> {
+        let url = format!("https://{}/{}/-/jobs/{}", &self.config.hostname, &self.config.project, job_id);
+        let _ = webbrowser::open(&url);
+        Ok(())
+    }
+
+    fn on_pipeline_open_in_browser(&self, pipeline_id: u64) -> Result<(), Error> {
+        let url = format!("https://{}/{}/pipelines/{}", &self.config.hostname, &self.config.project, pipeline_id);
+        let _ = webbrowser::open(&url);
+        Ok(())
+    }
+
+    fn on_o_key(&mut self) -> Result<(), Error> {
+        match self.mode {
+            CommandMode::Jobs(_) => {
+                if let Some(selected) = self.selected_job.selected() {
+                    if selected < self.jobs.len() {
+                        let job = &self.jobs[selected];
+                        self.on_job_open_in_browser(job.id)?;
+                    }
+                }
+            }
+            CommandMode::PipeDiff(_) => {
+                if let Some(selected) = self.selected_pipediff.selected() {
+                    if selected < self.pipediffs.len() {
+                        match &self.pipediffs[selected] {
+                            itertools::EitherOrBoth::Both(_, (_, b)) => {
+                                self.on_job_open_in_browser(b.id)?;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            },
+            CommandMode::Pipelines(_) => {
+                if let Some(selected) = self.selected_pipeline.selected() {
+                    if selected < self.pipelines.len() {
+                        let pipeline = &self.pipelines[selected];
+                        self.on_pipeline_open_in_browser(pipeline.id)?;
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     fn on_p_key(&mut self) -> Result<(), Error> {
         match self.mode {
             CommandMode::Jobs(_) => {
@@ -1123,6 +1170,9 @@ impl Main {
                     },
                     crossterm::event::KeyCode::Enter => {
                         self.on_enter()?;
+                    },
+                    crossterm::event::KeyCode::Char('o') => {
+                        self.on_o_key()?;
                     },
                     crossterm::event::KeyCode::Backspace => {
                         self.on_backspace()?;

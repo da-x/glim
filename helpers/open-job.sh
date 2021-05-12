@@ -50,7 +50,21 @@ tail-program() {
 }
 
 tmux-split() {
-    tmux split-window "GLCIM_API_KEY=${GLCIM_API_KEY} GLCIM_HOSTNAME=${GLCIM_HOSTNAME} GLCIM_PIPELINE_ID=${GLCIM_PIPELINE_ID} GLCIM_JOB_ID=${GLCIM_JOB_ID} GLCIM_JOB_NAME=${GLCIM_JOB_NAME} GLCIM_PROJECT=${GLCIM_PROJECT} GLCIM_COOKIE=${GLCIM_COOKIE} ${BASH_SOURCE} tail-program"
+    local params="GLCIM_HOSTNAME=${GLCIM_HOSTNAME} GLCIM_PIPELINE_ID=${GLCIM_PIPELINE_ID} GLCIM_JOB_ID=${GLCIM_JOB_ID} GLCIM_JOB_NAME=${GLCIM_JOB_NAME} GLCIM_PROJECT=${GLCIM_PROJECT}"
+
+    set +e
+
+    while read -r pane_id other ; do
+	echo $other | grep -q "$params"
+	if [[ $? == 0 ]] ; then
+	    # Use existing window
+	    tmux select-pane -t $pane_id
+	    exit 0
+	fi
+    done < <(tmux list-panes -F '#{pane_id} #{pane_start_command}')
+
+    # Splitting a new window
+    tmux split-window -P "GLCIM_API_KEY=${GLCIM_API_KEY} ${params}  GLCIM_COOKIE=${GLCIM_COOKIE} ${BASH_SOURCE} tail-program"
 }
 
 "$@"

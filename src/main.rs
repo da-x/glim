@@ -10,16 +10,20 @@ use std::path::PathBuf;
 use std::sync::{Mutex, mpsc, Arc};
 use std::io::stdout;
 use crossterm::{
-    event::{DisableMouseCapture, EnableMouseCapture, Event as CEvent, EventStream},
+    event::{Event as CEvent, EventStream},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, Clear, EnterAlternateScreen, LeaveAlternateScreen, ClearType},
 };
 use std::time::{Duration, Instant};
 use tui::Terminal;
 use tui::backend::CrosstermBackend;
-use tui::widgets::{Block, Borders};
+use tui::widgets::{Block, Borders, Sparkline};
 use tui::layout::Constraint;
 use futures_timer::Delay;
+use tui::style::Modifier;
+use tui::widgets::{Table, Cell, Row, BorderType};
+use tui::layout::{Direction, Layout};
+
 
 use futures::{
     channel,
@@ -101,9 +105,13 @@ struct CommandArgs {
     #[structopt(name = "debug", short="d")]
     debug: bool,
 
-    /// Request debug mode - no TUI
+    /// Non-interactive mode - print data and exit
     #[structopt(name = "non-interactive", short="n")]
     non_interactive: bool,
+
+    /// Disable auto-refresh (reloading server data)
+    #[structopt(name = "disable-auto-refresh", short="S")]
+    disable_auto_refresh: bool,
 
     #[structopt(subcommand)]
     command: CommandMode,
@@ -331,7 +339,7 @@ impl Thread {
                 Err(mpsc::RecvTimeoutError::Timeout) => {
                     continue;
                 }
-                e => return Ok(()),
+                _ => return Ok(()),
             }
 
             let mut updates = 0;
@@ -482,8 +490,10 @@ struct Main {
     leave: bool,
     pipediff_hide_unchanged: bool,
     non_interactive: bool,
-}
+    auto_refresh: bool,
+    first_load: bool,
 
+}
 impl Main {
     fn new(opt: &CommandArgs) -> Result<Self, Error> {
         let config_path = if let Some(config) = &opt.config {
@@ -533,7 +543,7 @@ impl Main {
                 rsp_sender,
                 current_user,
                 debug,
-                mode: command
+                mode: command,
             }.run();
         });
 
@@ -542,7 +552,7 @@ impl Main {
         }
         let mut stdout = stdout();
         if !opt.debug && !opt.non_interactive {
-            execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+            execute!(stdout, EnterAlternateScreen)?;
         }
         let backend = CrosstermBackend::new(stdout);
         let terminal = Terminal::new(backend)?;
@@ -563,6 +573,8 @@ impl Main {
             config,
             debug: opt.debug,
             pipediff_hide_unchanged: true,
+            auto_refresh: !opt.disable_auto_refresh,
+            first_load: true,
             prev_mode: None,
             mode: opt.command.clone(),
             rsp_recv: Some(rsp_recv),
@@ -574,7 +586,8 @@ impl Main {
         let mut rsp_recv = self.rsp_recv.take().unwrap();
 
         while !self.leave {
-            let updates : usize = {
+            let updates : usize = if self.auto_refresh || self.first_load {
+                self.first_load = false;
                 let mut state = self.state.lock().unwrap();
                 let mut updates = 0;
                 match self.mode {
@@ -595,6 +608,8 @@ impl Main {
                     },
                 }
                 updates
+            } else {
+                0
             };
             if updates > 0 {
                 let _ = self.tx_cmd.send(RxCmd::Refresh);
@@ -675,6 +690,31 @@ impl Main {
         Ok(false)
     }
 
+    fn status_line(auto_refresh: bool) -> Sparkline<'static> {
+        Sparkline::default()
+            .block(Block::default().title({
+                let mut s = String::new();
+                if auto_refresh {
+                    s += "Auto-refresh: enabled ('r' to toggle)";
+                } else {
+                    s += "Auto-refresh: disabled ('r' to toggle)";
+                }
+                s
+            }))
+            .data(&[0])
+            .style(Style::default().fg(Color::White))
+    }
+
+    fn divide_for_status_line(rect: tui::layout::Rect) -> Vec<tui::layout::Rect> {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints( [
+                Constraint::Min(0),
+                Constraint::Max(1),
+            ].as_ref()
+            ).split(rect)
+    }
+
     fn draw_pipelines(&mut self, info: PipelinesMode) -> Result<(), Error> {
         let state = self.state.lock().unwrap();
 
@@ -683,11 +723,9 @@ impl Main {
         let selected_pipeline = &mut self.selected_pipeline;
         let pipeline_ids = &mut self.pipelines;
         let ignored_pipeline_ids = &self.ignored_pipeline_ids;
+        let sparkline = Self::status_line(self.auto_refresh);
 
         self.terminal.draw(|rect| {
-            use tui::style::Modifier;
-            use tui::widgets::{Table, Cell, Row, BorderType};
-
             let mut items: Vec<_> = vec![];
             pipeline_ids.clear();
             let mut widths = vec![
@@ -791,13 +829,16 @@ impl Main {
             )
             .widths(&widths);
 
-            rect.render_stateful_widget(pipelines, rect.size(), selected_pipeline);
+            let chunks = Self::divide_for_status_line(rect.size());
+            rect.render_stateful_widget(pipelines, chunks[0], selected_pipeline);
+            rect.render_widget(sparkline, chunks[1]);
         })?;
 
         Ok(())
     }
 
     fn draw_jobs(&mut self) -> Result<(), Error> {
+        let sparkline = Self::status_line(self.auto_refresh);
         let state = self.state.lock().unwrap();
 
         state.jobs.fix_selected(&mut self.selected_job, None);
@@ -807,9 +848,6 @@ impl Main {
         printed_jobs.clear();
 
         self.terminal.draw(|rect| {
-            use tui::style::Modifier;
-            use tui::widgets::{Table, Cell, Row, BorderType};
-
             let mut items: Vec<_> = vec![];
             if let Some((_, jobs)) = &state.jobs.data {
                 for job in jobs.iter() {
@@ -854,13 +892,16 @@ impl Main {
                 Constraint::Length(40),
             ]);
 
-            rect.render_stateful_widget(jobs, rect.size(), selected_job);
+            let chunks = Self::divide_for_status_line(rect.size());
+            rect.render_stateful_widget(jobs, chunks[0], selected_job);
+            rect.render_widget(sparkline, chunks[1]);
         })?;
 
         Ok(())
     }
 
     fn draw_pipediff(&mut self) -> Result<(), Error> {
+        let sparkline = Self::status_line(self.auto_refresh);
         let state = self.state.lock().unwrap();
 
         state.pipediff.fix_selected(&mut self.selected_job, None);
@@ -871,9 +912,6 @@ impl Main {
 
         let pipediff_hide_unchanged = self.pipediff_hide_unchanged;
         self.terminal.draw(|rect| {
-            use tui::style::Modifier;
-            use tui::widgets::{Table, Cell, Row, BorderType};
-
             let mut items: Vec<_> = vec![];
             if let Some((_, pipediff)) = &state.pipediff.data {
                 for pipediff in pipediff.iter() {
@@ -938,7 +976,9 @@ impl Main {
                 Constraint::Length(10),
             ]);
 
-            rect.render_stateful_widget(pipediffs, rect.size(), selected_pipediff);
+            let chunks = Self::divide_for_status_line(rect.size());
+            rect.render_stateful_widget(pipediffs, chunks[0], selected_pipediff);
+            rect.render_widget(sparkline, chunks[1]);
         })?;
 
         Ok(())
@@ -996,6 +1036,7 @@ impl Main {
             CommandMode::Jobs(_) => {
                 if let Some(mode) = self.prev_mode.take() {
                     self.mode = mode;
+                    self.first_load = true;
                     let _ = self.tx_cmd.send(RxCmd::UpdateMode(self.mode.clone()));
                 }
             }
@@ -1062,6 +1103,7 @@ impl Main {
                                 pipeline_id: pipeline.id
                             })
                         ));
+                        self.first_load = true;
                         let mut state = self.state.lock().unwrap();
                         state.jobs.data = None;
                         let _ = self.tx_cmd.send(RxCmd::UpdateMode(self.mode.clone()));
@@ -1214,8 +1256,11 @@ impl Main {
                     crossterm::event::KeyCode::Char('q') => {
                         self.leave = true;
                     },
-                    crossterm::event::KeyCode::Char('r') => {
+                    crossterm::event::KeyCode::Char('c') => {
                         self.ignored_pipeline_ids.clear();
+                    },
+                    crossterm::event::KeyCode::Char('r') => {
+                        self.auto_refresh = !self.auto_refresh;
                     },
                     crossterm::event::KeyCode::Char('h') => {
                         self.pipediff_hide_unchanged = !self.pipediff_hide_unchanged;
@@ -1275,7 +1320,7 @@ impl Main {
     fn gain_terminal(&mut self) -> Result<(), Error> {
         enable_raw_mode()?;
         let mut stdout = stdout();
-        execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+        execute!(stdout, EnterAlternateScreen)?;
         Ok(())
     }
 
@@ -1284,7 +1329,6 @@ impl Main {
         execute!(
             self.terminal.backend_mut(),
             LeaveAlternateScreen,
-            DisableMouseCapture
         )?;
         self.terminal.show_cursor()?;
         Ok(())

@@ -24,6 +24,7 @@ use tui::style::Modifier;
 use tui::widgets::{Table, Cell, Row, BorderType};
 use tui::layout::{Direction, Layout};
 
+mod bridges;
 
 use futures::{
     channel,
@@ -156,11 +157,17 @@ struct Pipeline {
     updated_at: DateTime<Local>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct Bridge {
+    downstream_pipeline: Pipeline,
+}
+
 #[derive(Debug, Deserialize, Clone)]
 struct Job {
     id: u64,
     name: String,
     status: String,
+    pipeline: Pipeline,
 }
 
 use tui::{style::{Color, Style}, text::Span};
@@ -351,34 +358,57 @@ impl Thread {
 
             match &self.mode {
                 CommandMode::Jobs(info) => {
+                    let mut next_pipeline_id = Some(info.pipeline_id);
+                    let mut jobs = vec![];
+
                     if self.state.lock().unwrap().jobs.update {
-                        let endpoint =
-                            projects::pipelines::PipelineJobs::builder()
-                            .project(self.config.project.clone())
-                            .pipeline(info.pipeline_id)
-                            .scopes(vec![
-                                JobScope::Pending,
-                                JobScope::Running,
-                                JobScope::Failed,
-                                JobScope::Success,
-                                JobScope::Canceled,
-                            ].into_iter())
-                            .build().unwrap();
-                        let endpoint = gitlab::api::paged(endpoint,
-                            gitlab::api::Pagination::Limit(200));
-                        let jobs : Vec<Job> = endpoint.query(&self.gitlab).unwrap();
-                        let mut state = self.state.lock().unwrap();
+                        while let Some(pipeline_id) = next_pipeline_id.take() {
+                            let endpoint =
+                                projects::pipelines::PipelineJobs::builder()
+                                .project(self.config.project.clone())
+                                .pipeline(pipeline_id)
+                                .scopes(vec![
+                                    JobScope::Pending,
+                                    JobScope::Running,
+                                    JobScope::Failed,
+                                    JobScope::Success,
+                                    JobScope::Canceled,
+                                ].into_iter())
+                                .build().unwrap();
+                            let endpoint = gitlab::api::paged(endpoint,
+                                gitlab::api::Pagination::Limit(200));
+                            let added_jobs : Vec<Job> = endpoint.query(&self.gitlab).unwrap();
+                            jobs.extend(added_jobs);
 
-                        if self.debug {
-                            println!("glcim: jobs: {:?}", jobs);
-                        }
+                            if self.debug {
+                                println!("glcim: jobs: {:?}", jobs);
+                            }
 
-                        if state.jobs.update {
-                            state.jobs.data = Some((Instant::now(), jobs));
-                            state.request_count += 1;
-                            updates += 1;
-                            state.jobs.updated();
+                            let endpoint =
+                                bridges::PipelineBridges::builder()
+                                .project(self.config.project.clone())
+                                .pipeline(pipeline_id)
+                                .build().unwrap();
+                            let endpoint = gitlab::api::paged(endpoint,
+                                gitlab::api::Pagination::Limit(3));
+                            let mut bridges : Vec<Bridge> = endpoint.query(&self.gitlab).unwrap();
+
+                            if self.debug {
+                                println!("glcim: bridges: {:?}", bridges);
+                            }
+
+                            if let Some(bridge) = bridges.pop() {
+                                next_pipeline_id = Some(bridge.downstream_pipeline.id);
+                            }
                         }
+                    }
+
+                    let mut state = self.state.lock().unwrap();
+                    if state.jobs.update {
+                        state.jobs.data = Some((Instant::now(), jobs));
+                        state.request_count += 1;
+                        updates += 1;
+                        state.jobs.updated();
                     }
                 }
                 CommandMode::PipeDiff(pipediff) => {
@@ -856,6 +886,7 @@ impl Main {
                     let status = job.styled_status();
                     items.push(Row::new(vec![
                         Cell::from(Span::raw(job.id.to_string())),
+                        Cell::from(Span::raw(job.pipeline.id.to_string())),
                         Cell::from(status),
                         Cell::from(Span::raw(job.name.to_string())),
                     ]));
@@ -866,6 +897,10 @@ impl Main {
             .header(Row::new(vec![
                 Cell::from(Span::styled(
                     "ID",
+                    Style::default().add_modifier(Modifier::BOLD),
+                )),
+                Cell::from(Span::styled(
+                    "Pipeline",
                     Style::default().add_modifier(Modifier::BOLD),
                 )),
                 Cell::from(Span::styled(
@@ -888,8 +923,9 @@ impl Main {
                 Style::default().bg(Color::Rgb(60, 60, 80))
             )
             .widths(&[
+                Constraint::Length(9),
+                Constraint::Length(9),
                 Constraint::Length(10),
-                Constraint::Length(15),
                 Constraint::Length(40),
             ]);
 

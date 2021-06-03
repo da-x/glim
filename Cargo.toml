@@ -5,6 +5,7 @@ authors = ["Dan Aloni"]
 edition = "2018"
 
 [dependencies]
+derive_builder = "~0.9"
 gitlab = "0.1311.2"
 serde = { version = "1", features = ["derive"] }
 chrono = "0.4"

@@ -2,6 +2,7 @@ use serde::Deserialize;
 use gitlab::{Gitlab, api::projects::jobs::JobScope};
 use gitlab::api::{projects, Query, users};
 use gitlab::api::projects::pipelines::PipelineOrderBy;
+use std::collections::VecDeque;
 use chrono::{DateTime, Local};
 use thiserror::Error;
 use structopt::StructOpt;
@@ -53,7 +54,7 @@ struct PipelinesMode {
     #[structopt(name = "nr-pipelines", short="n", default_value="200")]
     nr_pipelines: usize,
 
-    /// Avoid resolving usernames when showing pipelines of all users
+    /// Avoid resolving usernames when showing pipelines of all users (slow!)
     #[structopt(name = "usernames-resolve", short="u")]
     resolve_usernames: bool,
 
@@ -284,6 +285,7 @@ enum RxCmd {
 struct Thread {
     gitlab: Gitlab,
     rx_cmd: mpsc::Receiver<RxCmd>,
+    pipeline_without_trigger: VecDeque<u64>,
     state: Arc<Mutex<State>>,
     rsp_sender: channel::mpsc::Sender<()>,
     current_user: User,
@@ -295,23 +297,49 @@ struct Thread {
 impl Thread {
     fn run_wrap(&mut self) -> Result<(), Error> {
         loop {
-            let cmd = self.rx_cmd.recv()?;
+            let mut updates = 0;
+            match &self.mode {
+                CommandMode::Jobs{..} => {}
+                CommandMode::PipeDiff{..} => {},
+                CommandMode::Pipelines(info) => {
+                    if info.resolve_usernames {
+                        if let Some(id) = self.pipeline_without_trigger.pop_back() {
+                            let endpoint = projects::pipelines::Pipeline::builder()
+                                .project(self.config.project.clone())
+                                .pipeline(id)
+                                .build().unwrap();
+                            let pipeline : PipelineDetails = endpoint.query(&self.gitlab).unwrap();
+                            let mut state = self.state.lock().unwrap();
+                            state.pipeline_trigger.insert(id, pipeline.user.username);
+                            state.request_count += 1;
+                            updates += 1;
+                        }
+                    }
+                }
+            }
+            if updates > 0 {
+                let _ = self.rsp_sender.try_send(());
+            }
+
+            let cmd = self.rx_cmd.recv_timeout(std::time::Duration::from_millis(1000));
 
             match cmd {
-                RxCmd::Refresh => {}
-                RxCmd::UpdateMode(mode) => {
+                Ok(RxCmd::Refresh) => {}
+                Ok(RxCmd::UpdateMode(mode)) => {
                     self.mode = mode;
                 }
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    continue;
+                }
+                e => return Ok(()),
             }
 
             let mut updates = 0;
-            let mut resolve_pipeline_trigger = vec![];
 
             if self.debug {
                 println!("glcim: request iteration");
             }
 
-            let mut resolve_usernames = false;
             match &self.mode {
                 CommandMode::Jobs(info) => {
                     if self.state.lock().unwrap().jobs.update {
@@ -386,7 +414,6 @@ impl Thread {
                     }
                 },
                 CommandMode::Pipelines(info) => {
-                    resolve_usernames = info.resolve_usernames;
                     if self.state.lock().unwrap().pipelines.update {
                         let mut endpoint = projects::pipelines::Pipelines::builder();
                         endpoint.project(self.config.project.clone());
@@ -411,7 +438,7 @@ impl Thread {
 
                         for pipeline in pipelines.iter() {
                             if state.pipeline_trigger.get(&pipeline.id).is_none() {
-                                resolve_pipeline_trigger.push(pipeline.id);
+                                self.pipeline_without_trigger.push_front(pipeline.id);
                             }
                         }
 
@@ -422,23 +449,6 @@ impl Thread {
                             state.pipelines.updated();
                         }
                     }
-                }
-            }
-
-            if resolve_usernames {
-                for id in resolve_pipeline_trigger.drain(..) {
-                    let endpoint = projects::pipelines::Pipeline::builder()
-                        .project(self.config.project.clone())
-                        .pipeline(id)
-                        .build().unwrap();
-                    let pipeline : PipelineDetails = endpoint.query(&self.gitlab).unwrap();
-                    let mut state = self.state.lock().unwrap();
-                    state.pipeline_trigger.insert(id, pipeline.user.username);
-                    state.request_count += 1;
-                    updates += 1;
-                    drop(state);
-
-                    std::thread::sleep(std::time::Duration::from_millis(1000));
                 }
             }
 
@@ -517,6 +527,7 @@ impl Main {
             Thread {
                 config: config2,
                 gitlab: client,
+                pipeline_without_trigger: VecDeque::new(),
                 state: state2,
                 rx_cmd: rx,
                 rsp_sender,
@@ -626,9 +637,9 @@ impl Main {
     }
 
     fn draw(&mut self) -> Result<(), Error> {
-        match self.mode {
+        match &self.mode {
             CommandMode::PipeDiff{..} => self.draw_pipediff(),
-            CommandMode::Pipelines{..} => self.draw_pipelines(),
+            CommandMode::Pipelines(info) => { let info = info.clone(); self.draw_pipelines(info) },
             CommandMode::Jobs{..} => self.draw_jobs(),
         }
     }
@@ -664,7 +675,7 @@ impl Main {
         Ok(false)
     }
 
-    fn draw_pipelines(&mut self) -> Result<(), Error> {
+    fn draw_pipelines(&mut self, info: PipelinesMode) -> Result<(), Error> {
         let state = self.state.lock().unwrap();
 
         state.pipelines.fix_selected(&mut self.selected_pipeline,
@@ -679,6 +690,19 @@ impl Main {
 
             let mut items: Vec<_> = vec![];
             pipeline_ids.clear();
+            let mut widths = vec![
+                Constraint::Length(8),
+                Constraint::Length(15),
+                Constraint::Length(10),
+                Constraint::Length(30),
+                Constraint::Length(12),
+                Constraint::Length(19),
+            ];
+
+            if !info.resolve_usernames {
+                widths.remove(1);
+            };
+
             if let Some((_, pipelines)) = &state.pipelines.data {
                 for pipeline in pipelines.iter() {
                     if ignored_pipeline_ids.get(&pipeline.id).is_some() {
@@ -702,44 +726,59 @@ impl Main {
                         }),
                     );
 
-                    items.push(Row::new(vec![
+                    let mut v = vec![
                         Cell::from(Span::raw(pipeline.id.to_string())),
                         Cell::from(Span::raw(user)),
                         Cell::from(status),
                         Cell::from(Span::raw(pipeline.r#ref.to_string())),
                         Cell::from(Span::raw(pipeline.sha.to_string())),
                         Cell::from(Span::raw(pipeline.created_at.to_string())),
-                    ]));
+                    ];
+
+                    if !info.resolve_usernames {
+                        v.remove(1);
+                    };
+
+                    items.push(Row::new(v));
                 }
             }
 
             let pipelines = Table::new(items)
-            .header(Row::new(vec![
-                Cell::from(Span::styled(
-                    "ID",
-                    Style::default().add_modifier(Modifier::BOLD),
-                )),
-                Cell::from(Span::styled(
-                    "User",
-                    Style::default().add_modifier(Modifier::BOLD),
-                )),
-                Cell::from(Span::styled(
-                    "Status",
-                    Style::default().add_modifier(Modifier::BOLD),
-                )),
-                Cell::from(Span::styled(
-                    "Ref",
-                    Style::default().add_modifier(Modifier::BOLD),
-                )),
-                Cell::from(Span::styled(
-                    "GitHash",
-                    Style::default().add_modifier(Modifier::BOLD),
-                )),
-                Cell::from(Span::styled(
-                    "Created at",
-                    Style::default().add_modifier(Modifier::BOLD),
-                )),
-            ]))
+            .header(Row::new({
+                let mut v = vec![
+                    Cell::from(Span::styled(
+                            "ID",
+                            Style::default().add_modifier(Modifier::BOLD),
+                    ))
+                ];
+
+                if info.resolve_usernames {
+                    v.push(Cell::from(Span::styled(
+                            "User",
+                            Style::default().add_modifier(Modifier::BOLD),
+                    )));
+                }
+
+                v.extend([
+                    Cell::from(Span::styled(
+                            "Status",
+                            Style::default().add_modifier(Modifier::BOLD),
+                    )),
+                    Cell::from(Span::styled(
+                            "Ref",
+                            Style::default().add_modifier(Modifier::BOLD),
+                    )),
+                    Cell::from(Span::styled(
+                            "GitHash",
+                            Style::default().add_modifier(Modifier::BOLD),
+                    )),
+                    Cell::from(Span::styled(
+                            "Created at",
+                            Style::default().add_modifier(Modifier::BOLD),
+                    )),
+                ].iter().cloned());
+                v
+            }))
             .block(
                 Block::default()
                     .borders(Borders::ALL)
@@ -750,14 +789,7 @@ impl Main {
             .highlight_style(
                 Style::default().bg(Color::Rgb(60, 60, 80))
             )
-            .widths(&[
-                Constraint::Length(8),
-                Constraint::Length(15),
-                Constraint::Length(10),
-                Constraint::Length(30),
-                Constraint::Length(12),
-                Constraint::Length(19),
-            ]);
+            .widths(&widths);
 
             rect.render_stateful_widget(pipelines, rect.size(), selected_pipeline);
         })?;
@@ -1088,6 +1120,19 @@ impl Main {
         Ok(())
     }
 
+    fn on_u_key(&mut self) -> Result<(), Error> {
+        match &mut self.mode {
+            CommandMode::Jobs(_) => {}
+            CommandMode::PipeDiff(_) => {},
+            CommandMode::Pipelines(info) => {
+                info.resolve_usernames = !info.resolve_usernames;
+                let _ = self.tx_cmd.send(RxCmd::UpdateMode(self.mode.clone()));
+            }
+        }
+
+        Ok(())
+    }
+
     fn on_p_key(&mut self) -> Result<(), Error> {
         match self.mode {
             CommandMode::Jobs(_) => {
@@ -1186,6 +1231,9 @@ impl Main {
                     },
                     crossterm::event::KeyCode::Char('o') => {
                         self.on_o_key()?;
+                    },
+                    crossterm::event::KeyCode::Char('u') => {
+                        self.on_u_key()?;
                     },
                     crossterm::event::KeyCode::Backspace => {
                         self.on_backspace()?;

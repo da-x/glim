@@ -159,7 +159,7 @@ struct Pipeline {
 
 #[derive(Debug, Clone, Deserialize)]
 struct Bridge {
-    downstream_pipeline: Pipeline,
+    downstream_pipeline: Option<Pipeline>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -391,14 +391,17 @@ impl Thread {
                                 .build().unwrap();
                             let endpoint = gitlab::api::paged(endpoint,
                                 gitlab::api::Pagination::Limit(3));
-                            let mut bridges : Vec<Bridge> = endpoint.query(&self.gitlab).unwrap();
+                            let bridges : Vec<Bridge> = endpoint.query(&self.gitlab).unwrap();
 
                             if self.debug {
                                 println!("glcim: bridges: {:?}", bridges);
                             }
 
-                            if let Some(bridge) = bridges.pop() {
-                                next_pipeline_id = Some(bridge.downstream_pipeline.id);
+                            for bridge in bridges.into_iter() {
+                                if let Some(downstream_pipeline) = bridge.downstream_pipeline {
+                                    next_pipeline_id = Some(downstream_pipeline.id);
+                                    break;
+                                }
                             }
                         }
                     }

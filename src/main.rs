@@ -50,7 +50,7 @@ pub enum Error {
 
 #[derive(Debug, StructOpt, Clone)]
 struct PipelinesMode {
-    /// Show the pipelines of all users
+    /// Show the pipelines of all users, not the only the invocing user
     #[structopt(name = "all-users", short="a")]
     all_users: bool,
 
@@ -62,6 +62,7 @@ struct PipelinesMode {
     #[structopt(name = "usernames-resolve", short="u")]
     resolve_usernames: bool,
 
+    /// The git branch on which to show pipelines (if not specificed - show all refs)
     #[structopt(name = "ref", short="r")]
     r#ref: Option<String>,
 }

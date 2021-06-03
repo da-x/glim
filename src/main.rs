@@ -45,8 +45,17 @@ pub enum Error {
 
 #[derive(Debug, StructOpt, Clone)]
 struct PipelinesMode {
-    #[structopt(name = "all", short="a")]
-    all: bool,
+    /// Show the pipelines of all users
+    #[structopt(name = "all-users", short="a")]
+    all_users: bool,
+
+    /// Number of pipelines to fetch
+    #[structopt(name = "nr-pipelines", short="n", default_value="200")]
+    nr_pipelines: usize,
+
+    /// Avoid resolving usernames when showing pipelines of all users
+    #[structopt(name = "usernames-resolve", short="u")]
+    resolve_usernames: bool,
 
     #[structopt(name = "ref", short="r")]
     r#ref: Option<String>,
@@ -302,6 +311,7 @@ impl Thread {
                 println!("glcim: request iteration");
             }
 
+            let mut resolve_usernames = false;
             match &self.mode {
                 CommandMode::Jobs(info) => {
                     if self.state.lock().unwrap().jobs.update {
@@ -376,11 +386,12 @@ impl Thread {
                     }
                 },
                 CommandMode::Pipelines(info) => {
+                    resolve_usernames = info.resolve_usernames;
                     if self.state.lock().unwrap().pipelines.update {
                         let mut endpoint = projects::pipelines::Pipelines::builder();
                         endpoint.project(self.config.project.clone());
                         endpoint.order_by(PipelineOrderBy::Id);
-                        if !info.all {
+                        if !info.all_users {
                             endpoint.username(&self.current_user.username);
                         }
                         if let Some(r#ref) = &info.r#ref {
@@ -388,7 +399,7 @@ impl Thread {
                         }
                         let endpoint = endpoint.build().unwrap();
                         let endpoint = gitlab::api::paged(endpoint,
-                            gitlab::api::Pagination::Limit(30));
+                            gitlab::api::Pagination::Limit(info.nr_pipelines));
 
                         let pipelines : Vec<Pipeline> = endpoint.query(&self.gitlab).unwrap();
 
@@ -414,19 +425,21 @@ impl Thread {
                 }
             }
 
-            for id in resolve_pipeline_trigger.drain(..) {
-                let endpoint = projects::pipelines::Pipeline::builder()
-                    .project(self.config.project.clone())
-                    .pipeline(id)
-                    .build().unwrap();
-                let pipeline : PipelineDetails = endpoint.query(&self.gitlab).unwrap();
-                if self.debug {
-                    println!("glcim: pipeline: {:?}", pipeline);
+            if resolve_usernames {
+                for id in resolve_pipeline_trigger.drain(..) {
+                    let endpoint = projects::pipelines::Pipeline::builder()
+                        .project(self.config.project.clone())
+                        .pipeline(id)
+                        .build().unwrap();
+                    let pipeline : PipelineDetails = endpoint.query(&self.gitlab).unwrap();
+                    let mut state = self.state.lock().unwrap();
+                    state.pipeline_trigger.insert(id, pipeline.user.username);
+                    state.request_count += 1;
+                    updates += 1;
+                    drop(state);
+
+                    std::thread::sleep(std::time::Duration::from_millis(1000));
                 }
-                let mut state = self.state.lock().unwrap();
-                state.pipeline_trigger.insert(id, pipeline.user.username);
-                state.request_count += 1;
-                updates += 1;
             }
 
             if updates > 0 {

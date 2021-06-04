@@ -7,11 +7,35 @@ Highlights:
 * Tail update of job execution in terminal.
 * Show difference in job status between two pipelines.
 
+
 ### Installation
 
 Install after Rust toolchain with `cargo install --path .`
 
 See [example config](example-config.toml) in the main directory.
+
+
+### Configuration
+
+While `glcim` can work as a standalone program, it can also use the current Git
+branch as default input to commands.
+
+Following configuration of the following git aliases:
+
+```
+[alias]
+        pipelines = !glcim from-alias pipelines
+[alias]
+        jobs  = !glcim from-alias jobs
+```
+
+This can be used as such:
+
+* `git pipelines` - Pipelines for the current branch.
+* `git pipelines (-a/--all)` - Your pipelines on all your branches.
+* `git pipelines (-e/--everyone)` - All users' pipelines (implicit `--all`).
+* `git jobs` - Jump to jobs for the most recent pipeline on the current branch.
+
 
 ## Command line
 

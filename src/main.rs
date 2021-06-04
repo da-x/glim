@@ -65,7 +65,7 @@ struct PipelinesMode {
     #[structopt(name = "usernames-resolve", short="u")]
     resolve_usernames: bool,
 
-    /// The git branch on which to show pipelines (if not specificed - show all refs)
+    /// The git branch on which to show pipelines (if not specified - show all refs)
     #[structopt(name = "ref", short="r")]
     r#ref: Option<String>,
 }
@@ -108,10 +108,29 @@ struct AliasJobsMode {
 }
 
 #[derive(Debug, StructOpt, Clone)]
+struct AliasPipelines {
+    /// Your pipelines on all your branches instead of current one
+    #[structopt(name = "all", short="a")]
+    all_refs: bool,
+
+    /// Show pipeines on specific ref
+    #[structopt(name = "ref", short="r")]
+    specific_ref: Option<String>,
+
+    /// Everyone's pipelines
+    #[structopt(name = "everyone", short="e")]
+    everyone: bool,
+}
+
+#[derive(Debug, StructOpt, Clone)]
 enum AliasCommands {
     /// Show all jobs for latest pipeline of the current branch
     #[structopt(name = "jobs")]
     Jobs(AliasJobsMode),
+
+    /// Show all jobs for latest pipeline of the current branch
+    #[structopt(name = "pipelines")]
+    Pipelines(AliasPipelines),
 }
 
 #[derive(Debug, StructOpt, Clone)]
@@ -623,6 +642,40 @@ impl Main {
 
                 return Ok(RunMode::Jobs(JobsMode {
                     pipeline_id
+                }));
+            }
+            AliasCommands::Pipelines(info) => {
+                let nr_pipelines = 50;
+
+                let branch = if let Some(ref_name) = info.specific_ref {
+                    ref_name.clone()
+                } else {
+                    Self::get_remote_branch(config)?
+                };
+
+                if info.everyone {
+                    return Ok(RunMode::Pipelines(PipelinesMode {
+                        all_users: true,
+                        nr_pipelines,
+                        resolve_usernames: true,
+                        r#ref: None,
+                    }));
+                }
+
+                if !info.all_refs  {
+                    return Ok(RunMode::Pipelines(PipelinesMode {
+                        all_users: false,
+                        nr_pipelines,
+                        resolve_usernames: false,
+                        r#ref: Some(branch),
+                    }));
+                }
+
+                return Ok(RunMode::Pipelines(PipelinesMode {
+                    all_users: false,
+                    nr_pipelines,
+                    resolve_usernames: false,
+                    r#ref: None,
                 }));
             }
         }

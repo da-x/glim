@@ -35,6 +35,8 @@ use futures::{
 pub enum Error {
     #[error("Io error; {0}")]
     IoError(#[from] std::io::Error),
+    #[error("API error; {0}")]
+    GitlabError(#[from] gitlab::GitlabError),
     #[error("Var error; {0}")]
     VarError(#[from] std::env::VarError),
     #[error("Config error: {0}")]
@@ -84,6 +86,35 @@ struct PipeDiff {
 }
 
 #[derive(Debug, StructOpt, Clone)]
+enum RunMode {
+    /// Show all pipelines for a project, or specific to current user
+    #[structopt(name = "pipelines")]
+    Pipelines(PipelinesMode),
+
+    /// Show difference between two pipes
+    #[structopt(name = "pipe-diff")]
+    PipeDiff(PipeDiff),
+
+    /// Show all jobs related to a given pipeline
+    #[structopt(name = "jobs")]
+    Jobs(JobsMode),
+}
+
+#[derive(Debug, StructOpt, Clone)]
+struct AliasJobsMode {
+    /// Use a specific pipeline number
+    #[structopt(name = "pipeline-id", short="p")]
+    pipeline_id: Option<u64>,
+}
+
+#[derive(Debug, StructOpt, Clone)]
+enum AliasCommands {
+    /// Show all jobs for latest pipeline of the current branch
+    #[structopt(name = "jobs")]
+    Jobs(AliasJobsMode),
+}
+
+#[derive(Debug, StructOpt, Clone)]
 enum CommandMode {
     /// Show all pipelines for a project, or specific to current user
     #[structopt(name = "pipelines")]
@@ -96,6 +127,10 @@ enum CommandMode {
     /// Show all jobs related to a given pipeline
     #[structopt(name = "jobs")]
     Jobs(JobsMode),
+
+    /// Interface for a git aliases that are sensitive to Git's state
+    #[structopt(name = "from-alias")]
+    FromAlias(AliasCommands)
 }
 
 #[derive(Debug, StructOpt)]
@@ -144,6 +179,10 @@ struct ConfigHooks {
     /// $GLCIM_JOB_ID, $GLCIM_JOB_NAME, $GLCIM_PIPELINE_ID, $GLCIM_HOSTNAME,
     /// $GLCIM_API_KEY, $GLCIM_PROJECT
     open_job_command: Option<String>,
+
+    /// Shell command to provide the remote ref of the current branch. Defaults
+    /// to remote tracking branch via: `git rev-parse --abbrev-ref --symbolic-full-name @{u};`
+    remote_ref_command: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -295,7 +334,7 @@ struct State {
 
 enum RxCmd {
     Refresh,
-    UpdateMode(CommandMode),
+    UpdateMode(RunMode),
 }
 
 struct Thread {
@@ -305,7 +344,7 @@ struct Thread {
     state: Arc<Mutex<State>>,
     rsp_sender: channel::mpsc::Sender<()>,
     current_user: User,
-    mode: CommandMode,
+    mode: RunMode,
     config: Config,
     debug: bool,
 }
@@ -315,9 +354,9 @@ impl Thread {
         loop {
             let mut updates = 0;
             match &self.mode {
-                CommandMode::Jobs{..} => {}
-                CommandMode::PipeDiff{..} => {},
-                CommandMode::Pipelines(info) => {
+                RunMode::Jobs{..} => {}
+                RunMode::PipeDiff{..} => {},
+                RunMode::Pipelines(info) => {
                     if info.resolve_usernames {
                         if let Some(id) = self.pipeline_without_trigger.pop_back() {
                             let endpoint = projects::pipelines::Pipeline::builder()
@@ -357,7 +396,7 @@ impl Thread {
             }
 
             match &self.mode {
-                CommandMode::Jobs(info) => {
+                RunMode::Jobs(info) => {
                     let mut next_pipeline_id = Some(info.pipeline_id);
                     let mut jobs = vec![];
 
@@ -414,7 +453,7 @@ impl Thread {
                         state.jobs.updated();
                     }
                 }
-                CommandMode::PipeDiff(pipediff) => {
+                RunMode::PipeDiff(pipediff) => {
                     if self.state.lock().unwrap().pipediff.update {
                         let get_jobs = &|num| {
                             let endpoint =
@@ -455,7 +494,7 @@ impl Thread {
                         }
                     }
                 },
-                CommandMode::Pipelines(info) => {
+                RunMode::Pipelines(info) => {
                     if self.state.lock().unwrap().pipelines.update {
                         let mut endpoint = projects::pipelines::Pipelines::builder();
                         endpoint.project(self.config.project.clone());
@@ -510,8 +549,8 @@ struct Main {
     state: Arc<Mutex<State>>,
     tx_cmd: mpsc::Sender<RxCmd>,
     rsp_recv: Option<channel::mpsc::Receiver<()>>,
-    prev_mode: Option<CommandMode>,
-    mode: CommandMode,
+    prev_mode: Option<RunMode>,
+    mode: RunMode,
     selected_pipeline: tui::widgets::TableState,
     selected_job: tui::widgets::TableState,
     selected_pipediff: tui::widgets::TableState,
@@ -529,6 +568,66 @@ struct Main {
 
 }
 impl Main {
+    fn get_remote_branch(config: &Config) -> Result<String, Error>  {
+        let shell = std::env::var("SHELL")?;
+        let mut command = std::process::Command::new(shell);
+        command.stdout(std::process::Stdio::piped());
+        command.arg("-c");
+        let script = if let Some(v) = &config.hooks.remote_ref_command {
+            v.as_str()
+        } else {
+            "git rev-parse --abbrev-ref --symbolic-full-name @{u}"
+        };
+        command.arg(script);
+        let child = command.spawn()?;
+        let output = child.wait_with_output()?;
+        let s = String::from_utf8_lossy(&output.stdout);
+        Ok(s.trim().to_owned())
+
+    }
+
+    fn command_mode_to_run_mode(
+        client: &Gitlab,
+        mode: CommandMode,
+        config: &Config) -> Result<RunMode, Error>
+    {
+        let alias = match mode {
+            CommandMode::Pipelines(x) => return Ok(RunMode::Pipelines(x)),
+            CommandMode::PipeDiff(x) => return Ok(RunMode::PipeDiff(x)),
+            CommandMode::Jobs(x) => return Ok(RunMode::Jobs(x)),
+            CommandMode::FromAlias(alias) => {
+                alias
+            }
+        };
+
+        match alias {
+            AliasCommands::Jobs(info) => {
+                let pipeline_id = if let Some(id) = info.pipeline_id {
+                    id
+                } else {
+                    let remote_ref = Self::get_remote_branch(config)?;
+
+                    let mut endpoint = projects::pipelines::Pipelines::builder();
+                    endpoint.project(config.project.clone());
+                    endpoint.order_by(PipelineOrderBy::Id);
+                    endpoint.ref_(remote_ref.to_owned());
+                    let endpoint = endpoint.build().unwrap();
+                    let endpoint = gitlab::api::paged(endpoint,
+                        gitlab::api::Pagination::Limit(1));
+
+                    let mut pipelines : Vec<Pipeline> = endpoint.query(client)
+                        .unwrap();
+
+                    pipelines.pop().unwrap().id
+                };
+
+                return Ok(RunMode::Jobs(JobsMode {
+                    pipeline_id
+                }));
+            }
+        }
+    }
+
     fn new(opt: &CommandArgs) -> Result<Self, Error> {
         let config_path = if let Some(config) = &opt.config {
             config.clone()
@@ -563,9 +662,10 @@ impl Main {
         let (tx, rx) = mpsc::channel();
         let (rsp_sender, rsp_recv) = channel::mpsc::channel(4);
 
-        let command = opt.command.clone();
-
         let debug = opt.debug;
+
+        let mode = Self::command_mode_to_run_mode(&client, opt.command.clone(), &config)?;
+        let mode2 = mode.clone();
 
         std::thread::spawn(move || {
             Thread {
@@ -577,7 +677,7 @@ impl Main {
                 rsp_sender,
                 current_user,
                 debug,
-                mode: command,
+                mode: mode2,
             }.run();
         });
 
@@ -610,7 +710,7 @@ impl Main {
             auto_refresh: !opt.disable_auto_refresh,
             first_load: true,
             prev_mode: None,
-            mode: opt.command.clone(),
+            mode,
             rsp_recv: Some(rsp_recv),
         })
     }
@@ -625,17 +725,17 @@ impl Main {
                 let mut state = self.state.lock().unwrap();
                 let mut updates = 0;
                 match self.mode {
-                    CommandMode::Pipelines{..} => {
+                    RunMode::Pipelines{..} => {
                         if state.pipelines.check_expiry(std::time::Duration::from_millis(10000)) {
                             updates += 1;
                         }
                     },
-                    CommandMode::Jobs{..} => {
+                    RunMode::Jobs{..} => {
                         if state.jobs.check_expiry(std::time::Duration::from_millis(10000)) {
                             updates += 1;
                         }
                     },
-                    CommandMode::PipeDiff{..} => {
+                    RunMode::PipeDiff{..} => {
                         if state.pipediff.check_expiry(std::time::Duration::from_millis(60000)) {
                             updates += 1;
                         }
@@ -687,15 +787,15 @@ impl Main {
 
     fn draw(&mut self) -> Result<(), Error> {
         match &self.mode {
-            CommandMode::PipeDiff{..} => self.draw_pipediff(),
-            CommandMode::Pipelines(info) => { let info = info.clone(); self.draw_pipelines(info) },
-            CommandMode::Jobs{..} => self.draw_jobs(),
+            RunMode::PipeDiff{..} => self.draw_pipediff(),
+            RunMode::Pipelines(info) => { let info = info.clone(); self.draw_pipelines(info) },
+            RunMode::Jobs{..} => self.draw_jobs(),
         }
     }
 
     fn check_report_non_interactive(&mut self) -> Result<bool, Error> {
         match &self.mode {
-            CommandMode::PipeDiff{..} => {
+            RunMode::PipeDiff{..} => {
                 return self.non_interactive_pipediff();
             }
             _ => {}
@@ -1027,9 +1127,9 @@ impl Main {
         let state = self.state.lock().unwrap();
 
         match self.mode {
-            CommandMode::Jobs(_) => state.jobs.up(&mut self.selected_job, None),
-            CommandMode::Pipelines(_) => state.pipelines.up(&mut self.selected_pipeline, None),
-            CommandMode::PipeDiff{..} => state.pipediff.up(&mut self.selected_pipediff, None),
+            RunMode::Jobs(_) => state.jobs.up(&mut self.selected_job, None),
+            RunMode::Pipelines(_) => state.pipelines.up(&mut self.selected_pipeline, None),
+            RunMode::PipeDiff{..} => state.pipediff.up(&mut self.selected_pipediff, None),
         }
 
         Ok(())
@@ -1039,9 +1139,9 @@ impl Main {
         let state = self.state.lock().unwrap();
 
         match self.mode {
-            CommandMode::Jobs(_) => state.jobs.down(&mut self.selected_job, Some(self.jobs.len())),
-            CommandMode::Pipelines(_) => state.pipelines.down(&mut self.selected_pipeline, Some(self.pipelines.len())),
-            CommandMode::PipeDiff{..} => state.pipediff.down(&mut self.selected_pipediff, Some(self.pipediffs.len())),
+            RunMode::Jobs(_) => state.jobs.down(&mut self.selected_job, Some(self.jobs.len())),
+            RunMode::Pipelines(_) => state.pipelines.down(&mut self.selected_pipeline, Some(self.pipelines.len())),
+            RunMode::PipeDiff{..} => state.pipediff.down(&mut self.selected_pipediff, Some(self.pipediffs.len())),
         }
 
         Ok(())
@@ -1051,9 +1151,9 @@ impl Main {
         let state = self.state.lock().unwrap();
 
         match self.mode {
-            CommandMode::Jobs(_) => state.jobs.home(&mut self.selected_job, None),
-            CommandMode::Pipelines(_) => state.pipelines.home(&mut self.selected_pipeline, None),
-            CommandMode::PipeDiff{..} => state.pipediff.home(&mut self.selected_pipediff, None),
+            RunMode::Jobs(_) => state.jobs.home(&mut self.selected_job, None),
+            RunMode::Pipelines(_) => state.pipelines.home(&mut self.selected_pipeline, None),
+            RunMode::PipeDiff{..} => state.pipediff.home(&mut self.selected_pipediff, None),
         }
 
         Ok(())
@@ -1063,9 +1163,9 @@ impl Main {
         let state = self.state.lock().unwrap();
 
         match self.mode {
-            CommandMode::Jobs(_) => state.jobs.end(&mut self.selected_job, Some(self.jobs.len())),
-            CommandMode::Pipelines(_) => state.pipelines.end(&mut self.selected_pipeline, Some(self.pipelines.len())),
-            CommandMode::PipeDiff{..} => state.pipediff.end(&mut self.selected_pipediff, Some(self.pipediffs.len())),
+            RunMode::Jobs(_) => state.jobs.end(&mut self.selected_job, Some(self.jobs.len())),
+            RunMode::Pipelines(_) => state.pipelines.end(&mut self.selected_pipeline, Some(self.pipelines.len())),
+            RunMode::PipeDiff{..} => state.pipediff.end(&mut self.selected_pipediff, Some(self.pipediffs.len())),
         }
 
         Ok(())
@@ -1073,15 +1173,15 @@ impl Main {
 
     fn on_backspace(&mut self) -> Result<(), Error> {
         match self.mode {
-            CommandMode::Jobs(_) => {
+            RunMode::Jobs(_) => {
                 if let Some(mode) = self.prev_mode.take() {
                     self.mode = mode;
                     self.first_load = true;
                     let _ = self.tx_cmd.send(RxCmd::UpdateMode(self.mode.clone()));
                 }
             }
-            CommandMode::PipeDiff{..} => { },
-            CommandMode::Pipelines(_) => { },
+            RunMode::PipeDiff{..} => { },
+            RunMode::Pipelines(_) => { },
         }
 
         Ok(())
@@ -1113,7 +1213,7 @@ impl Main {
 
     fn on_enter(&mut self) -> Result<(), Error> {
         match self.mode {
-            CommandMode::Jobs(ref info) => {
+            RunMode::Jobs(ref info) => {
                 if let Some(selected) = self.selected_job.selected() {
                     if selected < self.jobs.len() {
                         let job = &self.jobs[selected];
@@ -1121,7 +1221,7 @@ impl Main {
                     }
                 }
             }
-            CommandMode::PipeDiff(ref info) => {
+            RunMode::PipeDiff(ref info) => {
                 if let Some(selected) = self.selected_pipediff.selected() {
                     if selected < self.pipediffs.len() {
                         match &self.pipediffs[selected] {
@@ -1133,13 +1233,13 @@ impl Main {
                     }
                 }
             },
-            CommandMode::Pipelines(_) => {
+            RunMode::Pipelines(_) => {
                 if let Some(selected) = self.selected_pipeline.selected() {
                     if selected < self.pipelines.len() {
                         let pipeline = &self.pipelines[selected];
                         self.selected_job.select(None);
                         self.prev_mode = Some(std::mem::replace(&mut self.mode,
-                            CommandMode::Jobs(JobsMode {
+                            RunMode::Jobs(JobsMode {
                                 pipeline_id: pipeline.id
                             })
                         ));
@@ -1169,7 +1269,7 @@ impl Main {
 
     fn on_o_key(&mut self) -> Result<(), Error> {
         match self.mode {
-            CommandMode::Jobs(_) => {
+            RunMode::Jobs(_) => {
                 if let Some(selected) = self.selected_job.selected() {
                     if selected < self.jobs.len() {
                         let job = &self.jobs[selected];
@@ -1177,7 +1277,7 @@ impl Main {
                     }
                 }
             }
-            CommandMode::PipeDiff(_) => {
+            RunMode::PipeDiff(_) => {
                 if let Some(selected) = self.selected_pipediff.selected() {
                     if selected < self.pipediffs.len() {
                         match &self.pipediffs[selected] {
@@ -1189,7 +1289,7 @@ impl Main {
                     }
                 }
             },
-            CommandMode::Pipelines(_) => {
+            RunMode::Pipelines(_) => {
                 if let Some(selected) = self.selected_pipeline.selected() {
                     if selected < self.pipelines.len() {
                         let pipeline = &self.pipelines[selected];
@@ -1204,9 +1304,9 @@ impl Main {
 
     fn on_u_key(&mut self) -> Result<(), Error> {
         match &mut self.mode {
-            CommandMode::Jobs(_) => {}
-            CommandMode::PipeDiff(_) => {},
-            CommandMode::Pipelines(info) => {
+            RunMode::Jobs(_) => {}
+            RunMode::PipeDiff(_) => {},
+            RunMode::Pipelines(info) => {
                 info.resolve_usernames = !info.resolve_usernames;
                 let _ = self.tx_cmd.send(RxCmd::UpdateMode(self.mode.clone()));
             }
@@ -1217,9 +1317,9 @@ impl Main {
 
     fn on_p_key(&mut self) -> Result<(), Error> {
         match self.mode {
-            CommandMode::Jobs(_) => {
+            RunMode::Jobs(_) => {
             }
-            CommandMode::PipeDiff(ref info) => {
+            RunMode::PipeDiff(ref info) => {
                 if let Some(selected) = self.selected_pipediff.selected() {
                     if selected < self.pipediffs.len() {
                         match &self.pipediffs[selected] {
@@ -1231,7 +1331,7 @@ impl Main {
                     }
                 }
             },
-            CommandMode::Pipelines(_) => {
+            RunMode::Pipelines(_) => {
             }
         }
 
@@ -1240,10 +1340,10 @@ impl Main {
 
     fn on_delete(&mut self) -> Result<(), Error> {
         match self.mode {
-            CommandMode::Jobs(_) => {
+            RunMode::Jobs(_) => {
             }
-            CommandMode::PipeDiff{..} => { },
-            CommandMode::Pipelines(_) => {
+            RunMode::PipeDiff{..} => { },
+            RunMode::Pipelines(_) => {
                 if let Some(selected) = self.selected_pipeline.selected() {
                     if selected < self.pipelines.len() {
                         let pipeline = &self.pipelines[selected];
@@ -1261,10 +1361,10 @@ impl Main {
 
     fn on_l_key(&mut self) -> Result<(), Error> {
         match self.mode {
-            CommandMode::Jobs(_) => {
+            RunMode::Jobs(_) => {
             }
-            CommandMode::PipeDiff{..} => { },
-            CommandMode::Pipelines(_) => {
+            RunMode::PipeDiff{..} => { },
+            RunMode::Pipelines(_) => {
                 if let Some(local_repo) = &self.config.local_repo {
                     if let Some(selected) = self.selected_pipeline.selected() {
                         if selected < self.pipelines.len() {

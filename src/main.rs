@@ -38,8 +38,10 @@ use futures::{
 pub enum Error {
     #[error("Io error; {0}")]
     IoError(#[from] std::io::Error),
-    #[error("API error; {0}")]
-    AsyncGitlabError(#[from] gitlab::GitlabError),
+    #[error("Gitlab error; {0}")]
+    GitlabError(#[from] gitlab::GitlabError),
+    // #[error("API error; {0}")]
+    // RestError(#[from] gitlab::api::ApiError<gitlab::RestError>),
     #[error("Var error; {0}")]
     VarError(#[from] std::env::VarError),
     #[error("Config error: {0}")]
@@ -47,7 +49,13 @@ pub enum Error {
     #[error("Crossterm error: {0}")]
     CrosstermError(#[from] crossterm::ErrorKind),
     #[error("Command error: {0}")]
+    BoxError(#[from] Box<dyn std::error::Error>),
+    #[error("Command error: {0}")]
     Command(String),
+    #[error("Query builder error: {0}")]
+    BuilderError(String),
+    #[error("No pipeline found")]
+    NoPipelineFound,
     #[error("No default config file")]
     ConfigFile,
 }
@@ -389,10 +397,11 @@ impl Thread {
                     JobScope::Success,
                     JobScope::Canceled,
                 ].into_iter())
-                .build().unwrap();
+                .build().map_err(Error::BuilderError)?;
             let endpoint = gitlab::api::paged(endpoint,
                 gitlab::api::Pagination::Limit(300));
-            let added_jobs : Vec<Job> = endpoint.query_async(gitlab).await.unwrap();
+            let added_jobs : Vec<Job> = endpoint.query_async(gitlab).await
+                .map_err(|x| Error::BoxError(Box::new(x)))?;
 
             jobs.extend(added_jobs);
 
@@ -400,10 +409,11 @@ impl Thread {
                 bridges::PipelineBridges::builder()
                 .project(config.project.clone())
                 .pipeline(pipeline_id)
-                .build().unwrap();
+                .build().map_err(Error::BuilderError)?;
             let endpoint = gitlab::api::paged(endpoint,
                 gitlab::api::Pagination::Limit(3));
-            let bridges : Vec<Bridge> = endpoint.query_async(gitlab).await.unwrap();
+            let bridges : Vec<Bridge> = endpoint.query_async(gitlab).await
+                .map_err(|x| Error::BoxError(Box::new(x)))?;
 
             for bridge in bridges.into_iter() {
                 if let Some(downstream_pipeline) = bridge.downstream_pipeline {
@@ -433,9 +443,10 @@ impl Thread {
                             let endpoint = projects::pipelines::Pipeline::builder()
                                 .project(self.config.project.clone())
                                 .pipeline(id)
-                                .build().unwrap();
+                                .build().map_err(Error::BuilderError)?;
                             let pipeline : PipelineDetails =
-                                endpoint.query_async(&self.gitlab).await.unwrap();
+                                endpoint.query_async(&self.gitlab).await
+                                .map_err(|x| Error::BoxError(Box::new(x)))?;
                             let mut state = self.state.lock().await;
                             state.pipeline_trigger.insert(id, pipeline.user.username);
                             state.request_count += 1;
@@ -520,11 +531,11 @@ impl Thread {
                         if let Some(r#ref) = &info.r#ref {
                             endpoint.ref_(r#ref.to_owned());
                         }
-                        let endpoint = endpoint.build().unwrap();
+                        let endpoint = endpoint.build().map_err(Error::BuilderError)?;
                         let endpoint = gitlab::api::paged(endpoint,
                             gitlab::api::Pagination::Limit(info.nr_pipelines));
 
-                        let pipelines : Vec<Pipeline> = endpoint.query_async(&self.gitlab).await.unwrap();
+                        let pipelines : Vec<Pipeline> = endpoint.query_async(&self.gitlab).await.map_err(|x| Error::BoxError(Box::new(x)))?;
 
                         if self.debug {
                             println!("glcim: pipelines: {:?}", pipelines);
@@ -623,14 +634,18 @@ impl Main {
                     endpoint.project(config.project.clone());
                     endpoint.order_by(PipelineOrderBy::Id);
                     endpoint.ref_(remote_ref.to_owned());
-                    let endpoint = endpoint.build().unwrap();
+                    let endpoint = endpoint.build().map_err(Error::BuilderError)?;
                     let endpoint = gitlab::api::paged(endpoint,
                         gitlab::api::Pagination::Limit(1));
 
                     let mut pipelines : Vec<Pipeline> = endpoint.query_async(client)
-                        .await.unwrap();
+                        .await.map_err(|x| Error::BoxError(Box::new(x)))?;
 
-                    pipelines.pop().unwrap().id
+                    if let Some(pipeline) = pipelines.pop() {
+                        pipeline.id
+                    } else {
+                        return Err(Error::NoPipelineFound);
+                    }
                 };
 
                 return Ok(RunMode::Jobs(JobsMode {
@@ -687,10 +702,12 @@ impl Main {
 
         let mut settings = config::Config::default();
         settings
-            .merge(config::File::new(config_path.to_str().unwrap(), config::FileFormat::Toml))?
+            .merge(config::File::new(config_path.to_str()
+                    .ok_or_else(|| Error::ConfigFile)?,
+                    config::FileFormat::Toml))?
             // Add in settings from the environment (with a prefix of APP)
             // Eg.. `APP_DEBUG=1 ./target/app` would set the `debug` key
-            .merge(config::Environment::with_prefix("GITLAB_CI_CONSOLE")).unwrap();
+            .merge(config::Environment::with_prefix("GITLAB_CI_CONSOLE"))?;
 
         // Print out our settings (as a HashMap)
         let config = settings.try_into::<Config>()?;
@@ -699,10 +716,11 @@ impl Main {
         let builder = GitlabBuilder::new(&config.hostname, &config.api_key);
 
         // Create the client.
-        let client = builder.build_async().await.unwrap();
+        let client = builder.build_async().await?;
         let endpoint = users::CurrentUser::builder()
-            .build().unwrap();
-        let current_user: User = endpoint.query_async(&client).await.unwrap();
+            .build().map_err(Error::BuilderError)?;
+        let current_user: User = endpoint.query_async(&client).await
+            .map_err(|x| Error::BoxError(Box::new(x)))?;
 
         let state = Arc::new(Mutex::new(State::default()));
         let state2 = state.clone();
@@ -1612,19 +1630,24 @@ fn main_wrap() -> Result<(), Error> {
     let (mut glcim, v) = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .worker_threads(3)
-        .build()
-        .unwrap()
+        .build()?
         .block_on(async {
-            let mut glcim = Main::new(&opt).await.unwrap();
-            let v = glcim.run().await;
-            (glcim, v)
-        });
+            match Main::new(&opt).await {
+                Err(err) => {
+                    Err(err)
+                }
+                Ok(mut glcim) => {
+                    let v = glcim.run().await;
+                    Ok((glcim, v))
+                },
+            }
+        })?;
 
     if !opt.debug && !opt.non_interactive {
         glcim.release_terminal()?;
     }
-
     v?;
+
     Ok(())
 }
 

@@ -681,12 +681,14 @@ impl Main {
                 }
 
                 if !info.all_refs  {
-                    return Ok(RunMode::Pipelines(PipelinesMode {
-                        all_users: true,
-                        nr_pipelines,
-                        resolve_usernames: false,
-                        r#ref: Some(branch),
-                    }));
+                    if branch.len() > 0 {
+                        return Ok(RunMode::Pipelines(PipelinesMode {
+                            all_users: true,
+                            nr_pipelines,
+                            resolve_usernames: false,
+                            r#ref: Some(branch),
+                        }));
+                    }
                 }
 
                 return Ok(RunMode::Pipelines(PipelinesMode {

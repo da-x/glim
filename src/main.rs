@@ -581,6 +581,7 @@ struct Main {
     debug: bool,
     leave: bool,
     pipediff_hide_unchanged: bool,
+    pipelines_select_for_diff: Option<(Option<u64>, Option<u64>)>,
     non_interactive: bool,
     auto_refresh: bool,
     first_load: bool,
@@ -760,6 +761,7 @@ impl Main {
             config,
             debug: opt.debug,
             pipediff_hide_unchanged: true,
+            pipelines_select_for_diff: None,
             auto_refresh: !opt.disable_auto_refresh,
             first_load: true,
             prev_mode: None,
@@ -840,7 +842,10 @@ impl Main {
 
     fn draw(&mut self) -> Result<(), Error> {
         match &self.mode {
-            RunMode::PipeDiff{..} => self.draw_pipediff(),
+            RunMode::PipeDiff(info) => {
+                let info = info.clone();
+                self.draw_pipediff(info)
+            }
             RunMode::Pipelines(info) => { let info = info.clone(); self.draw_pipelines(info) },
             RunMode::Jobs{..} => self.draw_jobs(),
         }
@@ -911,22 +916,28 @@ impl Main {
         let pipeline_ids = &mut self.pipelines;
         let ignored_pipeline_ids = &self.ignored_pipeline_ids;
         let sparkline = Self::status_line(self.auto_refresh);
+        let pipelines_select_for_diff = &self.pipelines_select_for_diff;
 
         self.terminal.draw(|rect| {
             let mut items: Vec<_> = vec![];
             pipeline_ids.clear();
             let mut widths = vec![
                 Constraint::Length(8),
-                Constraint::Length(15),
+            ];
+            if info.resolve_usernames {
+                widths.push(Constraint::Length(15));
+            };
+
+            if pipelines_select_for_diff.is_some() {
+                widths.push(Constraint::Length(5));
+            }
+
+            widths.extend(vec![
                 Constraint::Length(10),
                 Constraint::Length(30),
                 Constraint::Length(12),
                 Constraint::Length(19),
-            ];
-
-            if !info.resolve_usernames {
-                widths.remove(1);
-            };
+            ]);
 
             if let Some((_, pipelines)) = &state.pipelines.data {
                 for pipeline in pipelines.iter() {
@@ -940,6 +951,7 @@ impl Main {
                     } else {
                         "..."
                     };
+
                     let status = Span::styled(
                         &pipeline.status,
                         Style::default().fg(match pipeline.status.as_str() {
@@ -953,16 +965,33 @@ impl Main {
 
                     let mut v = vec![
                         Cell::from(Span::raw(pipeline.id.to_string())),
-                        Cell::from(Span::raw(user)),
+                    ];
+
+                    if info.resolve_usernames {
+                        v.push(Cell::from(Span::raw(user)));
+                    }
+
+                    if let Some((from, to)) = pipelines_select_for_diff {
+                        let mut f = Span::raw(" ");
+                        if let Some(from) = from {
+                            if pipeline.id == *from {
+                                f = Span::raw("from");
+                            }
+                        }
+                        if let Some(to) = to {
+                            if pipeline.id == *to {
+                                f = Span::raw("to");
+                            }
+                        }
+                        v.push(Cell::from(f));
+                    }
+
+                    v.extend(vec![
                         Cell::from(status),
                         Cell::from(Span::raw(pipeline.r#ref.to_string())),
                         Cell::from(Span::raw(pipeline.sha.to_string())),
                         Cell::from(Span::raw(pipeline.created_at.to_string())),
-                    ];
-
-                    if !info.resolve_usernames {
-                        v.remove(1);
-                    };
+                    ]);
 
                     items.push(Row::new(v));
                 }
@@ -980,6 +1009,13 @@ impl Main {
                 if info.resolve_usernames {
                     v.push(Cell::from(Span::styled(
                             "User",
+                            Style::default().add_modifier(Modifier::BOLD),
+                    )));
+                }
+
+                if pipelines_select_for_diff.is_some() {
+                    v.push(Cell::from(Span::styled(
+                            "Diff",
                             Style::default().add_modifier(Modifier::BOLD),
                     )));
                 }
@@ -1093,7 +1129,7 @@ impl Main {
         Ok(())
     }
 
-    fn draw_pipediff(&mut self) -> Result<(), Error> {
+    fn draw_pipediff(&mut self, info: PipeDiff) -> Result<(), Error> {
         let sparkline = Self::status_line(self.auto_refresh);
         let state = self.state.lock().unwrap();
 
@@ -1155,7 +1191,7 @@ impl Main {
                 Block::default()
                     .borders(Borders::ALL)
                     .style(Style::default().fg(Color::White))
-                    .title("Jobs")
+                    .title(format!("Jobs: Pipe diff {} -> {}", info.from, info.to))
                     .border_type(BorderType::Plain),
             )
             .highlight_style(
@@ -1225,16 +1261,32 @@ impl Main {
     }
 
     fn on_backspace(&mut self) -> Result<(), Error> {
-        match self.mode {
-            RunMode::Jobs(_) => {
-                if let Some(mode) = self.prev_mode.take() {
-                    self.mode = mode;
-                    self.first_load = true;
-                    let _ = self.tx_cmd.send(RxCmd::UpdateMode(self.mode.clone()));
+        if let Some(mode) = self.prev_mode.take() {
+            self.mode = mode;
+            self.first_load = true;
+            let _ = self.tx_cmd.send(RxCmd::UpdateMode(self.mode.clone()));
+        }
+
+        Ok(())
+    }
+
+    fn on_set_pipediff_range(&mut self, set_from: bool) -> Result<(), Error> {
+        if let Some((Some(from), Some(to))) = &mut self.pipelines_select_for_diff {
+            if let Some(selected) = self.selected_pipeline.selected() {
+                if selected < self.pipelines.len() {
+                    let pipeline = &self.pipelines[selected];
+                    if set_from {
+                        if pipeline.id != *to {
+                            *from = pipeline.id;
+                        }
+                    } else {
+                        if pipeline.id != *from {
+                            *to = pipeline.id;
+                        }
+                    }
                 }
             }
-            RunMode::PipeDiff{..} => { },
-            RunMode::Pipelines(_) => { },
+            return Ok(());
         }
 
         Ok(())
@@ -1244,8 +1296,7 @@ impl Main {
         if let Some(open_job_command) = &self.config.hooks.open_job_command {
             let shell = std::env::var("SHELL")?;
             let mut command =
-                std::process::Command::new(shell);
-            command.arg("-c");
+                std::process::Command::new(shell); command.arg("-c");
             command.arg(open_job_command);
             command.env("GLCIM_JOB_ID", format!("{}", job.id));
             command.env("GLCIM_JOB_NAME", format!("{}", job.name));
@@ -1287,6 +1338,19 @@ impl Main {
                 }
             },
             RunMode::Pipelines(_) => {
+                if let Some((Some(from), Some(to))) = &self.pipelines_select_for_diff {
+                    self.prev_mode = Some(std::mem::replace(&mut self.mode,
+                        RunMode::PipeDiff(PipeDiff { from: *from, to: *to })
+                    ));
+                    self.selected_pipediff.select(None);
+                    self.first_load = true;
+
+                    let mut state = self.state.lock().unwrap();
+                    state.pipediff.data = None;
+                    let _ = self.tx_cmd.send(RxCmd::UpdateMode(self.mode.clone()));
+                    return Ok(());
+                }
+
                 if let Some(selected) = self.selected_pipeline.selected() {
                     if selected < self.pipelines.len() {
                         let pipeline = &self.pipelines[selected];
@@ -1452,6 +1516,20 @@ impl Main {
                     crossterm::event::KeyCode::Char('c') => {
                         self.ignored_pipeline_ids.clear();
                     },
+                    crossterm::event::KeyCode::Char('d') => {
+                        if self.pipelines_select_for_diff.is_some() {
+                            self.pipelines_select_for_diff = None;
+                        } else {
+                            if self.pipelines.len() >= 2 {
+                                let from = &self.pipelines[0];
+                                let to = &self.pipelines[1];
+                                self.pipelines_select_for_diff = Some((
+                                        Some(to.id), Some(from.id)
+                                ))
+                            }
+                        }
+                    },
+
                     crossterm::event::KeyCode::Char('r') => {
                         self.auto_refresh = !self.auto_refresh;
                     },
@@ -1475,6 +1553,12 @@ impl Main {
                     },
                     crossterm::event::KeyCode::Backspace => {
                         self.on_backspace()?;
+                    },
+                    crossterm::event::KeyCode::Char('t') => {
+                        self.on_set_pipediff_range(false)?;
+                    },
+                    crossterm::event::KeyCode::Char('f') => {
+                        self.on_set_pipediff_range(true)?;
                     },
                     crossterm::event::KeyCode::Delete => {
                         self.on_delete()?;

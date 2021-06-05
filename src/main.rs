@@ -49,7 +49,7 @@ pub enum Error {
     #[error("Crossterm error: {0}")]
     CrosstermError(#[from] crossterm::ErrorKind),
     #[error("Command error: {0}")]
-    BoxError(#[from] Box<dyn std::error::Error>),
+    BoxError(#[from] Box<dyn std::error::Error + Send>),
     #[error("Command error: {0}")]
     Command(String),
     #[error("Query builder error: {0}")]
@@ -400,11 +400,9 @@ impl Thread {
                 .build().map_err(Error::BuilderError)?;
             let endpoint = gitlab::api::paged(endpoint,
                 gitlab::api::Pagination::Limit(300));
-            let added_jobs : Vec<Job> = endpoint.query_async(gitlab).await
-                .map_err(|x| Error::BoxError(Box::new(x)))?;
+            let jobs_query = endpoint.query_async(gitlab);
 
-            jobs.extend(added_jobs);
-
+            let gitlab = gitlab.clone();
             let endpoint =
                 bridges::PipelineBridges::builder()
                 .project(config.project.clone())
@@ -412,9 +410,17 @@ impl Thread {
                 .build().map_err(Error::BuilderError)?;
             let endpoint = gitlab::api::paged(endpoint,
                 gitlab::api::Pagination::Limit(3));
-            let bridges : Vec<Bridge> = endpoint.query_async(gitlab).await
+            let bridges_query = endpoint.query_async(&gitlab);
+
+            let (jobs_result, bridges_result) =
+                futures::join!(jobs_query, bridges_query);
+
+            let added_jobs : Vec<Job> = jobs_result
+                .map_err(|x| Error::BoxError(Box::new(x)))?;
+            let bridges : Vec<Bridge> = bridges_result
                 .map_err(|x| Error::BoxError(Box::new(x)))?;
 
+            jobs.extend(added_jobs);
             for bridge in bridges.into_iter() {
                 if let Some(downstream_pipeline) = bridge.downstream_pipeline {
                     next_pipeline_id = Some(downstream_pipeline.id);
@@ -502,9 +508,13 @@ impl Thread {
                 RunMode::PipeDiff(pipediff) => {
                     if self.state.lock().await.pipediff.update {
                         let from = Self::get_jobs(pipediff.from,
-                            &self.config, &self.gitlab).await?;
+                            &self.config, &self.gitlab);
+                        let gitlab = self.gitlab.clone();
                         let to = Self::get_jobs(pipediff.to,
-                            &self.config, &self.gitlab).await?;
+                            &self.config, &gitlab);
+                        let (from, to) = futures::join!(from, to);
+                        let from = from?;
+                        let to = to?;
 
                         let v : Vec<itertools::EitherOrBoth<(String, Job), (String, Job)>> =
                             itertools::merge_join_by(from, to, |(k1, _), (k2, _)|

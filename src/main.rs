@@ -414,54 +414,68 @@ impl Thread {
                 println!("glcim: request iteration");
             }
 
+            let get_jobs = &|num| {
+                let mut next_pipeline_id = Some(num);
+                let mut jobs = vec![];
+
+                while let Some(pipeline_id) = next_pipeline_id.take() {
+                    let endpoint =
+                        projects::pipelines::PipelineJobs::builder()
+                        .project(self.config.project.clone())
+                        .pipeline(num)
+                        .scopes(vec![
+                            JobScope::Pending,
+                            JobScope::Running,
+                            JobScope::Failed,
+                            JobScope::Success,
+                            JobScope::Canceled,
+                        ].into_iter())
+                        .build().unwrap();
+                    let endpoint = gitlab::api::paged(endpoint,
+                        gitlab::api::Pagination::Limit(300));
+                    let added_jobs : Vec<Job> = endpoint.query(&self.gitlab).unwrap();
+
+                    jobs.extend(added_jobs);
+
+                    if self.debug {
+                        println!("glcim: jobs: {:?}", jobs);
+                    }
+
+                    let endpoint =
+                        bridges::PipelineBridges::builder()
+                        .project(self.config.project.clone())
+                        .pipeline(pipeline_id)
+                        .build().unwrap();
+                    let endpoint = gitlab::api::paged(endpoint,
+                        gitlab::api::Pagination::Limit(3));
+                    let bridges : Vec<Bridge> = endpoint.query(&self.gitlab).unwrap();
+
+                    if self.debug {
+                        println!("glcim: bridges: {:?}", bridges);
+                    }
+
+                    for bridge in bridges.into_iter() {
+                        if let Some(downstream_pipeline) = bridge.downstream_pipeline {
+                            next_pipeline_id = Some(downstream_pipeline.id);
+                            break;
+                        }
+                    }
+                }
+
+                let mut map = std::collections::BTreeMap::new();
+                for job in jobs.into_iter() {
+                    map.insert(job.name.clone(), job);
+                }
+                map
+            };
+
             match &self.mode {
                 RunMode::Jobs(info) => {
-                    let mut next_pipeline_id = Some(info.pipeline_id);
                     let mut jobs = vec![];
 
                     if self.state.lock().unwrap().jobs.update {
-                        while let Some(pipeline_id) = next_pipeline_id.take() {
-                            let endpoint =
-                                projects::pipelines::PipelineJobs::builder()
-                                .project(self.config.project.clone())
-                                .pipeline(pipeline_id)
-                                .scopes(vec![
-                                    JobScope::Pending,
-                                    JobScope::Running,
-                                    JobScope::Failed,
-                                    JobScope::Success,
-                                    JobScope::Canceled,
-                                ].into_iter())
-                                .build().unwrap();
-                            let endpoint = gitlab::api::paged(endpoint,
-                                gitlab::api::Pagination::Limit(200));
-                            let added_jobs : Vec<Job> = endpoint.query(&self.gitlab).unwrap();
-                            jobs.extend(added_jobs);
-
-                            if self.debug {
-                                println!("glcim: jobs: {:?}", jobs);
-                            }
-
-                            let endpoint =
-                                bridges::PipelineBridges::builder()
-                                .project(self.config.project.clone())
-                                .pipeline(pipeline_id)
-                                .build().unwrap();
-                            let endpoint = gitlab::api::paged(endpoint,
-                                gitlab::api::Pagination::Limit(3));
-                            let bridges : Vec<Bridge> = endpoint.query(&self.gitlab).unwrap();
-
-                            if self.debug {
-                                println!("glcim: bridges: {:?}", bridges);
-                            }
-
-                            for bridge in bridges.into_iter() {
-                                if let Some(downstream_pipeline) = bridge.downstream_pipeline {
-                                    next_pipeline_id = Some(downstream_pipeline.id);
-                                    break;
-                                }
-                            }
-                        }
+                        jobs = get_jobs(info.pipeline_id).values()
+                            .into_iter().map(|x| x.clone()).collect();
                     }
 
                     let mut state = self.state.lock().unwrap();
@@ -474,29 +488,6 @@ impl Thread {
                 }
                 RunMode::PipeDiff(pipediff) => {
                     if self.state.lock().unwrap().pipediff.update {
-                        let get_jobs = &|num| {
-                            let endpoint =
-                                projects::pipelines::PipelineJobs::builder()
-                                .project(self.config.project.clone())
-                                .pipeline(num)
-                                .scopes(vec![
-                                    JobScope::Pending,
-                                    JobScope::Running,
-                                    JobScope::Failed,
-                                    JobScope::Success,
-                                    JobScope::Canceled,
-                                ].into_iter())
-                                .build().unwrap();
-                            let endpoint = gitlab::api::paged(endpoint,
-                                gitlab::api::Pagination::Limit(300));
-                            let jobs : Vec<Job> = endpoint.query(&self.gitlab).unwrap();
-                            let mut map = std::collections::BTreeMap::new();
-                            for job in jobs.into_iter() {
-                                map.insert(job.name.clone(), job);
-                            }
-                            map
-                        };
-
                         let from = get_jobs(pipediff.from);
                         let to = get_jobs(pipediff.to);
                         let v : Vec<itertools::EitherOrBoth<(String, Job), (String, Job)>> =

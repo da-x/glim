@@ -20,14 +20,13 @@ See [example config](example-config.toml) in the main directory.
 While `glcim` can work as a standalone program, it can also use the current Git
 branch as default input to commands.
 
-Following configuration of the following git aliases:
+Following configuration of the Git aliases:
 
 ```
-[alias]
-        pipelines = !glcim from-alias pipelines
-[alias]
-        jobs  = !glcim from-alias jobs
+git config --local alias.pipelines '!glcim from-alias pipelines'
+git config --local alias.job '!glcim from-alias job'
 ```
+
 
 This can be used as such:
 

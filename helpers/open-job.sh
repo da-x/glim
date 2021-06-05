@@ -11,6 +11,13 @@ front-program() {
     local project="${GLCIM_PROJECT//\//%2F}"
     set +e
 
+    #
+    # We use session cookie instead of API key because the lack of byte range
+    # support.
+    #
+    # See issue: https://gitlab.com/gitlab-org/gitlab/-/issues/216738
+    #
+
     while [ 1 ] ; do
 	if [[ "${GLCIM_COOKIE}" != "" ]] ; then
 	    curl \

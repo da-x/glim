@@ -10,7 +10,12 @@ PROJECT=$(cat ~/.config/glcim/config.toml | grep ^project | awk -F\" '{print $2}
 project_encoded=$(echo ${PROJECT} | sed s@/@%2F@g)
 
 projects() {
-    curl -s https://${GLHOST}/api/v4/projects/${project_encoded}/$1\?name=x\&access_token=${KEY} | jq .
+    curl -s https://${GLHOST}/api/v4/projects/${project_encoded}/$1\?access_token=${KEY} | jq .
 }
+
+job-log() {
+    curl https://${GLHOST}/api/v4/projects/${project_encoded}/jobs/$1/trace\?access_token=${KEY} -L -o output.txt -C -
+}
+
 
 "$@"

@@ -664,7 +664,7 @@ impl Main {
 
                 if !info.all_refs  {
                     return Ok(RunMode::Pipelines(PipelinesMode {
-                        all_users: false,
+                        all_users: true,
                         nr_pipelines,
                         resolve_usernames: false,
                         r#ref: Some(branch),

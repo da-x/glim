@@ -1,13 +1,14 @@
 use serde::Deserialize;
-use gitlab::{Gitlab, api::projects::jobs::JobScope};
-use gitlab::api::{projects, Query, users};
+use gitlab::{AsyncGitlab, GitlabBuilder, api::projects::jobs::JobScope};
+use gitlab::api::{projects, users};
 use gitlab::api::projects::pipelines::PipelineOrderBy;
-use std::collections::VecDeque;
+use gitlab::api::AsyncQuery;
+use std::collections::{BTreeMap, VecDeque};
 use chrono::{DateTime, Local};
 use thiserror::Error;
 use structopt::StructOpt;
 use std::path::PathBuf;
-use std::sync::{Mutex, mpsc, Arc};
+use std::sync::Arc;
 use std::io::stdout;
 use crossterm::{
     event::{Event as CEvent, EventStream},
@@ -23,11 +24,13 @@ use futures_timer::Delay;
 use tui::style::Modifier;
 use tui::widgets::{Table, Cell, Row, BorderType};
 use tui::layout::{Direction, Layout};
+use tokio::sync::Mutex;
 
 mod bridges;
 
 use futures::{
     channel,
+    channel::mpsc,
     future::FutureExt, select, StreamExt,
 };
 
@@ -36,13 +39,11 @@ pub enum Error {
     #[error("Io error; {0}")]
     IoError(#[from] std::io::Error),
     #[error("API error; {0}")]
-    GitlabError(#[from] gitlab::GitlabError),
+    AsyncGitlabError(#[from] gitlab::GitlabError),
     #[error("Var error; {0}")]
     VarError(#[from] std::env::VarError),
     #[error("Config error: {0}")]
     ConfigError(#[from] config::ConfigError),
-    #[error("Recv error: {0}")]
-    RecvError(#[from] mpsc::RecvError),
     #[error("Crossterm error: {0}")]
     CrosstermError(#[from] crossterm::ErrorKind),
     #[error("Command error: {0}")]
@@ -357,7 +358,7 @@ enum RxCmd {
 }
 
 struct Thread {
-    gitlab: Gitlab,
+    gitlab: AsyncGitlab,
     rx_cmd: mpsc::Receiver<RxCmd>,
     pipeline_without_trigger: VecDeque<u64>,
     state: Arc<Mutex<State>>,
@@ -369,9 +370,60 @@ struct Thread {
 }
 
 impl Thread {
-    fn run_wrap(&mut self) -> Result<(), Error> {
+    async fn get_jobs(pipeline_id: u64,
+        config: &Config, gitlab: &AsyncGitlab) ->
+        Result<BTreeMap<String, Job>, Error>
+    {
+        let mut next_pipeline_id = Some(pipeline_id);
+        let mut jobs = vec![];
+
+        while let Some(pipeline_id) = next_pipeline_id.take() {
+            let endpoint =
+                projects::pipelines::PipelineJobs::builder()
+                .project(config.project.clone())
+                .pipeline(pipeline_id)
+                .scopes(vec![
+                    JobScope::Pending,
+                    JobScope::Running,
+                    JobScope::Failed,
+                    JobScope::Success,
+                    JobScope::Canceled,
+                ].into_iter())
+                .build().unwrap();
+            let endpoint = gitlab::api::paged(endpoint,
+                gitlab::api::Pagination::Limit(300));
+            let added_jobs : Vec<Job> = endpoint.query_async(gitlab).await.unwrap();
+
+            jobs.extend(added_jobs);
+
+            let endpoint =
+                bridges::PipelineBridges::builder()
+                .project(config.project.clone())
+                .pipeline(pipeline_id)
+                .build().unwrap();
+            let endpoint = gitlab::api::paged(endpoint,
+                gitlab::api::Pagination::Limit(3));
+            let bridges : Vec<Bridge> = endpoint.query_async(gitlab).await.unwrap();
+
+            for bridge in bridges.into_iter() {
+                if let Some(downstream_pipeline) = bridge.downstream_pipeline {
+                    next_pipeline_id = Some(downstream_pipeline.id);
+                    break;
+                }
+            }
+        }
+
+        let mut map = std::collections::BTreeMap::new();
+        for job in jobs.into_iter() {
+            map.insert(job.name.clone(), job);
+        }
+
+        Ok(map)
+    }
+
+    async fn run(&mut self) -> Result<(), Error> {
         loop {
-            let mut updates = 0;
+            let mut updates : usize = 0;
             match &self.mode {
                 RunMode::Jobs{..} => {}
                 RunMode::PipeDiff{..} => {},
@@ -382,8 +434,9 @@ impl Thread {
                                 .project(self.config.project.clone())
                                 .pipeline(id)
                                 .build().unwrap();
-                            let pipeline : PipelineDetails = endpoint.query(&self.gitlab).unwrap();
-                            let mut state = self.state.lock().unwrap();
+                            let pipeline : PipelineDetails =
+                                endpoint.query_async(&self.gitlab).await.unwrap();
+                            let mut state = self.state.lock().await;
                             state.pipeline_trigger.insert(id, pipeline.user.username);
                             state.request_count += 1;
                             updates += 1;
@@ -395,90 +448,39 @@ impl Thread {
                 let _ = self.rsp_sender.try_send(());
             }
 
-            let cmd = self.rx_cmd.recv_timeout(std::time::Duration::from_millis(1000));
-
-            match cmd {
-                Ok(RxCmd::Refresh) => {}
-                Ok(RxCmd::UpdateMode(mode)) => {
-                    self.mode = mode;
-                }
-                Err(mpsc::RecvTimeoutError::Timeout) => {
+            let delay = Delay::new(Duration::from_millis(1000));
+            select! {
+                _ = delay.fuse() => {
                     continue;
+                },
+                cmd = self.rx_cmd.next() => {
+                    match cmd {
+                        Some(RxCmd::Refresh) => {}
+                        Some(RxCmd::UpdateMode(mode)) => {
+                            self.mode = mode;
+                        }
+                        _ => return Ok(()),
+                    }
                 }
-                _ => return Ok(()),
             }
 
-            let mut updates = 0;
+            let mut updates : usize = 0;
 
             if self.debug {
                 println!("glcim: request iteration");
             }
 
-            let get_jobs = &|num| {
-                let mut next_pipeline_id = Some(num);
-                let mut jobs = vec![];
-
-                while let Some(pipeline_id) = next_pipeline_id.take() {
-                    let endpoint =
-                        projects::pipelines::PipelineJobs::builder()
-                        .project(self.config.project.clone())
-                        .pipeline(num)
-                        .scopes(vec![
-                            JobScope::Pending,
-                            JobScope::Running,
-                            JobScope::Failed,
-                            JobScope::Success,
-                            JobScope::Canceled,
-                        ].into_iter())
-                        .build().unwrap();
-                    let endpoint = gitlab::api::paged(endpoint,
-                        gitlab::api::Pagination::Limit(300));
-                    let added_jobs : Vec<Job> = endpoint.query(&self.gitlab).unwrap();
-
-                    jobs.extend(added_jobs);
-
-                    if self.debug {
-                        println!("glcim: jobs: {:?}", jobs);
-                    }
-
-                    let endpoint =
-                        bridges::PipelineBridges::builder()
-                        .project(self.config.project.clone())
-                        .pipeline(pipeline_id)
-                        .build().unwrap();
-                    let endpoint = gitlab::api::paged(endpoint,
-                        gitlab::api::Pagination::Limit(3));
-                    let bridges : Vec<Bridge> = endpoint.query(&self.gitlab).unwrap();
-
-                    if self.debug {
-                        println!("glcim: bridges: {:?}", bridges);
-                    }
-
-                    for bridge in bridges.into_iter() {
-                        if let Some(downstream_pipeline) = bridge.downstream_pipeline {
-                            next_pipeline_id = Some(downstream_pipeline.id);
-                            break;
-                        }
-                    }
-                }
-
-                let mut map = std::collections::BTreeMap::new();
-                for job in jobs.into_iter() {
-                    map.insert(job.name.clone(), job);
-                }
-                map
-            };
-
             match &self.mode {
                 RunMode::Jobs(info) => {
                     let mut jobs = vec![];
 
-                    if self.state.lock().unwrap().jobs.update {
-                        jobs = get_jobs(info.pipeline_id).values()
-                            .into_iter().map(|x| x.clone()).collect();
+                    if self.state.lock().await.jobs.update {
+                        jobs = Self::get_jobs(info.pipeline_id,
+                            &self.config, &self.gitlab).await?
+                            .values().into_iter().map(|x| x.clone()).collect();
                     }
 
-                    let mut state = self.state.lock().unwrap();
+                    let mut state = self.state.lock().await;
                     if state.jobs.update {
                         state.jobs.data = Some((Instant::now(), jobs));
                         state.request_count += 1;
@@ -487,15 +489,18 @@ impl Thread {
                     }
                 }
                 RunMode::PipeDiff(pipediff) => {
-                    if self.state.lock().unwrap().pipediff.update {
-                        let from = get_jobs(pipediff.from);
-                        let to = get_jobs(pipediff.to);
+                    if self.state.lock().await.pipediff.update {
+                        let from = Self::get_jobs(pipediff.from,
+                            &self.config, &self.gitlab).await?;
+                        let to = Self::get_jobs(pipediff.to,
+                            &self.config, &self.gitlab).await?;
+
                         let v : Vec<itertools::EitherOrBoth<(String, Job), (String, Job)>> =
                             itertools::merge_join_by(from, to, |(k1, _), (k2, _)|
                                 Ord::cmp(k1, k2)
                             ).collect();
 
-                        let mut state = self.state.lock().unwrap();
+                        let mut state = self.state.lock().await;
                         if state.pipediff.update {
                             state.pipediff.data = Some((Instant::now(), v));
                             state.request_count += 1;
@@ -505,7 +510,7 @@ impl Thread {
                     }
                 },
                 RunMode::Pipelines(info) => {
-                    if self.state.lock().unwrap().pipelines.update {
+                    if self.state.lock().await.pipelines.update {
                         let mut endpoint = projects::pipelines::Pipelines::builder();
                         endpoint.project(self.config.project.clone());
                         endpoint.order_by(PipelineOrderBy::Id);
@@ -519,13 +524,13 @@ impl Thread {
                         let endpoint = gitlab::api::paged(endpoint,
                             gitlab::api::Pagination::Limit(info.nr_pipelines));
 
-                        let pipelines : Vec<Pipeline> = endpoint.query(&self.gitlab).unwrap();
+                        let pipelines : Vec<Pipeline> = endpoint.query_async(&self.gitlab).await.unwrap();
 
                         if self.debug {
                             println!("glcim: pipelines: {:?}", pipelines);
                         }
 
-                        let mut state = self.state.lock().unwrap();
+                        let mut state = self.state.lock().await;
 
                         for pipeline in pipelines.iter() {
                             if state.pipeline_trigger.get(&pipeline.id).is_none() {
@@ -547,10 +552,6 @@ impl Thread {
                 let _ = self.rsp_sender.try_send(());
             }
         }
-    }
-
-    fn run(&mut self) {
-        let _ = self.run_wrap();
     }
 }
 
@@ -597,8 +598,8 @@ impl Main {
 
     }
 
-    fn command_mode_to_run_mode(
-        client: &Gitlab,
+    async fn command_mode_to_run_mode(
+        client: &AsyncGitlab,
         mode: CommandMode,
         config: &Config) -> Result<RunMode, Error>
     {
@@ -626,8 +627,8 @@ impl Main {
                     let endpoint = gitlab::api::paged(endpoint,
                         gitlab::api::Pagination::Limit(1));
 
-                    let mut pipelines : Vec<Pipeline> = endpoint.query(client)
-                        .unwrap();
+                    let mut pipelines : Vec<Pipeline> = endpoint.query_async(client)
+                        .await.unwrap();
 
                     pipelines.pop().unwrap().id
                 };
@@ -673,7 +674,7 @@ impl Main {
         }
     }
 
-    fn new(opt: &CommandArgs) -> Result<Self, Error> {
+    async fn new(opt: &CommandArgs) -> Result<Self, Error> {
         let config_path = if let Some(config) = &opt.config {
             config.clone()
         } else {
@@ -695,25 +696,26 @@ impl Main {
         let config = settings.try_into::<Config>()?;
         let config2 = config.clone();
 
-        // Create the client.
-        let client = Gitlab::new(&config.hostname, &config.api_key).unwrap();
+        let builder = GitlabBuilder::new(&config.hostname, &config.api_key);
 
+        // Create the client.
+        let client = builder.build_async().await.unwrap();
         let endpoint = users::CurrentUser::builder()
             .build().unwrap();
-        let current_user: User = endpoint.query(&client).unwrap();
+        let current_user: User = endpoint.query_async(&client).await.unwrap();
 
         let state = Arc::new(Mutex::new(State::default()));
         let state2 = state.clone();
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::channel(10);
         let (rsp_sender, rsp_recv) = channel::mpsc::channel(4);
 
         let debug = opt.debug;
 
-        let mode = Self::command_mode_to_run_mode(&client, opt.command.clone(), &config)?;
+        let mode = Self::command_mode_to_run_mode(&client, opt.command.clone(), &config).await?;
         let mode2 = mode.clone();
 
-        std::thread::spawn(move || {
-            Thread {
+        tokio::spawn(async move {
+            let _r = Thread {
                 config: config2,
                 gitlab: client,
                 pipeline_without_trigger: VecDeque::new(),
@@ -723,7 +725,7 @@ impl Main {
                 current_user,
                 debug,
                 mode: mode2,
-            }.run();
+            }.run().await;
         });
 
         if !opt.debug && !opt.non_interactive {
@@ -768,7 +770,7 @@ impl Main {
         while !self.leave {
             let updates : usize = if self.auto_refresh || self.first_load {
                 self.first_load = false;
-                let mut state = self.state.lock().unwrap();
+                let mut state = self.state.lock().await;
                 let mut updates = 0;
                 match self.mode {
                     RunMode::Pipelines{..} => {
@@ -792,14 +794,14 @@ impl Main {
                 0
             };
             if updates > 0 {
-                let _ = self.tx_cmd.send(RxCmd::Refresh);
+                let _ = self.tx_cmd.try_send(RxCmd::Refresh);
             }
 
             if !self.debug {
                 if !self.non_interactive {
-                    self.draw()?;
+                    self.draw().await?;
                 } else {
-                    if self.check_report_non_interactive()? {
+                    if self.check_report_non_interactive().await? {
                         break;
                     }
                 }
@@ -812,7 +814,7 @@ impl Main {
                 maybe_event = reader.next().fuse() => {
                     match maybe_event {
                         Some(Ok(CEvent::Mouse{..})) => continue,
-                        Some(Ok(event)) => { self.on_event(event)? }
+                        Some(Ok(event)) => { self.on_event(event).await? }
                         Some(Err(_)) => {
                             break;
                         }
@@ -831,21 +833,21 @@ impl Main {
         Ok(())
     }
 
-    fn draw(&mut self) -> Result<(), Error> {
+    async fn draw(&mut self) -> Result<(), Error> {
         match &self.mode {
             RunMode::PipeDiff(info) => {
                 let info = info.clone();
-                self.draw_pipediff(info)
+                self.draw_pipediff(info).await
             }
-            RunMode::Pipelines(info) => { let info = info.clone(); self.draw_pipelines(info) },
-            RunMode::Jobs{..} => self.draw_jobs(),
+            RunMode::Pipelines(info) => { let info = info.clone(); self.draw_pipelines(info).await },
+            RunMode::Jobs{..} => self.draw_jobs().await,
         }
     }
 
-    fn check_report_non_interactive(&mut self) -> Result<bool, Error> {
+    async fn check_report_non_interactive(&mut self) -> Result<bool, Error> {
         match &self.mode {
             RunMode::PipeDiff{..} => {
-                return self.non_interactive_pipediff();
+                return self.non_interactive_pipediff().await;
             }
             _ => {}
         };
@@ -853,8 +855,8 @@ impl Main {
         Ok(false)
     }
 
-    fn non_interactive_pipediff(&mut self) -> Result<bool, Error> {
-        let state = self.state.lock().unwrap();
+    async fn non_interactive_pipediff(&mut self) -> Result<bool, Error> {
+        let state = self.state.lock().await;
 
         if let Some((_, pipediff)) = &state.pipediff.data {
             for res in pipediff.iter() {
@@ -898,8 +900,8 @@ impl Main {
             ).split(rect)
     }
 
-    fn draw_pipelines(&mut self, info: PipelinesMode) -> Result<(), Error> {
-        let state = self.state.lock().unwrap();
+    async fn draw_pipelines(&mut self, info: PipelinesMode) -> Result<(), Error> {
+        let state = self.state.lock().await;
 
         state.pipelines.fix_selected(&mut self.selected_pipeline,
             Some(self.pipelines.len()));
@@ -1051,9 +1053,9 @@ impl Main {
         Ok(())
     }
 
-    fn draw_jobs(&mut self) -> Result<(), Error> {
+    async fn draw_jobs(&mut self) -> Result<(), Error> {
         let sparkline = Self::status_line(self.auto_refresh);
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().await;
 
         state.jobs.fix_selected(&mut self.selected_job, None);
         let printed_jobs = &mut self.jobs;
@@ -1120,9 +1122,9 @@ impl Main {
         Ok(())
     }
 
-    fn draw_pipediff(&mut self, info: PipeDiff) -> Result<(), Error> {
+    async fn draw_pipediff(&mut self, info: PipeDiff) -> Result<(), Error> {
         let sparkline = Self::status_line(self.auto_refresh);
-        let state = self.state.lock().unwrap();
+        let state = self.state.lock().await;
 
         state.pipediff.fix_selected(&mut self.selected_job, None);
         let printed_pipediffs = &mut self.pipediffs;
@@ -1203,8 +1205,9 @@ impl Main {
 
         Ok(())
     }
-    fn on_up(&mut self) -> Result<(), Error> {
-        let state = self.state.lock().unwrap();
+
+    async fn on_up(&mut self) -> Result<(), Error> {
+        let state = self.state.lock().await;
 
         match self.mode {
             RunMode::Jobs(_) => state.jobs.up(&mut self.selected_job, None),
@@ -1215,8 +1218,8 @@ impl Main {
         Ok(())
     }
 
-    fn on_down(&mut self) -> Result<(), Error> {
-        let state = self.state.lock().unwrap();
+    async fn on_down(&mut self) -> Result<(), Error> {
+        let state = self.state.lock().await;
 
         match self.mode {
             RunMode::Jobs(_) => state.jobs.down(&mut self.selected_job, Some(self.jobs.len())),
@@ -1227,8 +1230,8 @@ impl Main {
         Ok(())
     }
 
-    fn on_home(&mut self) -> Result<(), Error> {
-        let state = self.state.lock().unwrap();
+    async fn on_home(&mut self) -> Result<(), Error> {
+        let state = self.state.lock().await;
 
         match self.mode {
             RunMode::Jobs(_) => state.jobs.home(&mut self.selected_job, None),
@@ -1239,8 +1242,8 @@ impl Main {
         Ok(())
     }
 
-    fn on_end(&mut self) -> Result<(), Error> {
-        let state = self.state.lock().unwrap();
+    async fn on_end(&mut self) -> Result<(), Error> {
+        let state = self.state.lock().await;
 
         match self.mode {
             RunMode::Jobs(_) => state.jobs.end(&mut self.selected_job, Some(self.jobs.len())),
@@ -1255,7 +1258,7 @@ impl Main {
         if let Some(mode) = self.prev_mode.take() {
             self.mode = mode;
             self.first_load = true;
-            let _ = self.tx_cmd.send(RxCmd::UpdateMode(self.mode.clone()));
+            let _ = self.tx_cmd.try_send(RxCmd::UpdateMode(self.mode.clone()));
         }
 
         Ok(())
@@ -1306,7 +1309,7 @@ impl Main {
         Ok(())
     }
 
-    fn on_enter(&mut self) -> Result<(), Error> {
+    async fn on_enter(&mut self) -> Result<(), Error> {
         match self.mode {
             RunMode::Jobs(ref info) => {
                 if let Some(selected) = self.selected_job.selected() {
@@ -1336,9 +1339,9 @@ impl Main {
                     self.selected_pipediff.select(None);
                     self.first_load = true;
 
-                    let mut state = self.state.lock().unwrap();
+                    let mut state = self.state.lock().await;
                     state.pipediff.data = None;
-                    let _ = self.tx_cmd.send(RxCmd::UpdateMode(self.mode.clone()));
+                    let _ = self.tx_cmd.try_send(RxCmd::UpdateMode(self.mode.clone()));
                     return Ok(());
                 }
 
@@ -1352,9 +1355,9 @@ impl Main {
                             })
                         ));
                         self.first_load = true;
-                        let mut state = self.state.lock().unwrap();
+                        let mut state = self.state.lock().await;
                         state.jobs.data = None;
-                        let _ = self.tx_cmd.send(RxCmd::UpdateMode(self.mode.clone()));
+                        let _ = self.tx_cmd.try_send(RxCmd::UpdateMode(self.mode.clone()));
                     }
                 }
             }
@@ -1416,7 +1419,7 @@ impl Main {
             RunMode::PipeDiff(_) => {},
             RunMode::Pipelines(info) => {
                 info.resolve_usernames = !info.resolve_usernames;
-                let _ = self.tx_cmd.send(RxCmd::UpdateMode(self.mode.clone()));
+                let _ = self.tx_cmd.try_send(RxCmd::UpdateMode(self.mode.clone()));
             }
         }
 
@@ -1497,7 +1500,7 @@ impl Main {
         Ok(())
     }
 
-    fn on_event(&mut self, event: CEvent) -> Result<(), Error> {
+    async fn on_event(&mut self, event: CEvent) -> Result<(), Error> {
         match event {
             CEvent::Key(key_event) => {
                 match key_event.code {
@@ -1534,7 +1537,7 @@ impl Main {
                         self.on_p_key()?;
                     },
                     crossterm::event::KeyCode::Enter => {
-                        self.on_enter()?;
+                        self.on_enter().await?;
                     },
                     crossterm::event::KeyCode::Char('o') => {
                         self.on_o_key()?;
@@ -1555,26 +1558,26 @@ impl Main {
                         self.on_delete()?;
                     },
                     crossterm::event::KeyCode::Up => {
-                        self.on_up()?;
+                        self.on_up().await?;
                     },
                     crossterm::event::KeyCode::Down => {
-                        self.on_down()?;
+                        self.on_down().await?;
                     },
                     crossterm::event::KeyCode::PageUp => {
                         for _ in 0..crossterm::terminal::size()?.1.saturating_sub(2) {
-                            self.on_up()?;
+                            self.on_up().await?;
                         }
                     },
                     crossterm::event::KeyCode::PageDown => {
                         for _ in 0..crossterm::terminal::size()?.1.saturating_sub(2) {
-                            self.on_down()?;
+                            self.on_down().await?;
                         }
                     },
                     crossterm::event::KeyCode::Home => {
-                        self.on_home()?;
+                        self.on_home().await?;
                     },
                     crossterm::event::KeyCode::End => {
-                        self.on_end()?;
+                        self.on_end().await?;
                     },
                     _ => { }
                 }
@@ -1605,7 +1608,6 @@ impl Main {
 
 fn main_wrap() -> Result<(), Error> {
     let opt = CommandArgs::from_args();
-    let mut glcim = Main::new(&opt)?;
 
     let (mut glcim, v) = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -1613,6 +1615,7 @@ fn main_wrap() -> Result<(), Error> {
         .build()
         .unwrap()
         .block_on(async {
+            let mut glcim = Main::new(&opt).await.unwrap();
             let v = glcim.run().await;
             (glcim, v)
         });

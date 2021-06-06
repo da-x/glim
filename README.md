@@ -24,7 +24,7 @@ Following configuration of the Git aliases:
 
 ```
 git config --local alias.pipelines '!glim from-alias pipelines'
-git config --local alias.job '!glim from-alias job'
+git config --local alias.jobs '!glim from-alias jobs'
 ```
 
 

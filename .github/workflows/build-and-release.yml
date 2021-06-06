@@ -1,4 +1,4 @@
-name: Build and Release
+name: Release
 
 on:
   push:
@@ -6,43 +6,23 @@ on:
     tags:
     - 'v*' # Push events to matching v*, i.e. v1.0, v20.15.10
 
-jobs:
-  build:
+env:
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  CARGO_TERM_COLOR: always
 
+jobs:
+  build-and-upload:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
         os: [ubuntu-latest, ubuntu-18.04, macOS-latest]
-
     steps:
-    - uses: actions/checkout@v2
-
-    - name: Build
-      env:
-        CARGO_TERM_COLOR: always
-      run: |
-        cargo build --release --verbose
-        zip glim.zip --junk-paths target/release/glim
-
-    - name: Create Release
-      id: create_release
-      uses: actions/create-release@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        tag_name: ${{ github.ref }}
-        release_name: Release ${{ github.ref }}
-        draft: true
-        prerelease: true
-
-    - name: Upload Release Asset
-      id: upload-release-asset 
-      uses: actions/upload-release-asset@v1
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        # This pulls from the CREATE RELEASE step above, referencing it's ID to get its outputs object, which include a `upload_url`. See this blog post for more info: https://jasonet.co/posts/new-features-of-github-actions/#passing-data-to-future-steps 
-        upload_url: ${{ steps.create_release.outputs.upload_url }}
-        asset_path: ./glim.zip
-        asset_name: glim.${{ github.ref }}.${{ matrix.os }}.zip
-        asset_content_type: application/zip
+      - uses: actions/checkout@v2
+      - name: Build
+        run: |
+          cargo build --release --verbose
+      - name: Upload
+        run: |
+          suffix=$(basename ${{ github.ref }}).${{ matrix.os }}
+          zip glim.${suffix}.zip --junk-paths target/release/glim
+          ./.github/workflows/upload_asset.sh glim.${suffix}.zip $GITHUB_TOKEN

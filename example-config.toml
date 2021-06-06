@@ -1,6 +1,7 @@
-# Location: ~/.config/glim/config.toml
+# Location of this file:
 #
-# Or on MacOSX: ~/Library/Application\ Support/glim/config.toml
+# Linux: ~/.config/glim/config.toml
+# MacOSX: ~/Library/Application\ Support/glim/config.toml
 
 api_key = "<SECRET-KEY>"
 hostname = "your-gitlab-server.com"
@@ -15,26 +16,30 @@ project = "dev/project"
 # cookie = "a891bc7f17baf88164baf61010128a81"
 #
 # How to obtain this? In your browser, you need to click left to the URL and
-# and get out the value of `_gitlab_session` cookie.
+# and get out the value of `_gitlab_session` cookie out of the session beloning
+# to the domain on which your gitlab instance is hosted.
 #
 # Once in awhile this cookie needs to be updated.
 #
 #
 # ## Job log support ###
 #
-# You need to point the open_job_command hook to execute the provided
-# open-job.sh script under `helpers` with the `tmux-split` command.
+# To following hook determines how to implement the 'open job log' functionality.
+# For example, the `open-job.sh` script can be used to open it in a split tmux
+# pane. For that, the `open_job_command` needs to point to the script, and the
+# tmux-split parameter is needed.
 #
 #     [hooks]
 #     open_job_command = "~/.config/glim/open-job.sh tmux-split"
 #
 #
-# ## Matching local repo to remote ref
+# ## Matching local branch to remote ref
 #
-# Suppose there's non trivial matching from local branch to remote ref, and
-# there's a customer command to resolve that mapping, you can add it to to
-# `remote_ref_command`. For example, here's a hook to execute `git prop -n`
-# with a fallback to remote tracking branch resolution:
+# Suppose there's non-trivial matching from local branch to remote ref, and
+# there's a custom command to resolve that mapping. You can set
+# `remote_ref_command`.  To provide that mapping. For example, here's a hook to
+# read a special field from Gitt's own config with a fallback to remote
+# tracking branch resolution:
 #
 #     [hooks]
 #     remote_ref_command= "BRANCH=$(git symbolic-ref --short HEAD); v=$(git config --local --get branch.${BRANCH}.remote-ref || true); if [[ ! -z \"${v}\" ]] ; then echo $v ; else git rev-parse --abbrev-ref --symbolic-full-name @{u}; fi"

@@ -484,7 +484,7 @@ impl Thread {
             let mut updates : usize = 0;
 
             if self.debug {
-                println!("glcim: request iteration");
+                println!("glim: request iteration");
             }
 
             match &self.mode {
@@ -548,7 +548,7 @@ impl Thread {
                         let pipelines : Vec<Pipeline> = endpoint.query_async(&self.gitlab).await.map_err(|x| Error::BoxError(Box::new(x)))?;
 
                         if self.debug {
-                            println!("glcim: pipelines: {:?}", pipelines);
+                            println!("glim: pipelines: {:?}", pipelines);
                         }
 
                         let mut state = self.state.lock().await;
@@ -706,7 +706,7 @@ impl Main {
             config.clone()
         } else {
             if let Some(dir) = dirs::config_dir() {
-                dir.join("glcim").join("config.toml")
+                dir.join("glim").join("config.toml")
             } else {
                 return Err(Error::ConfigFile);
             }
@@ -1639,7 +1639,7 @@ impl Main {
 fn main_wrap() -> Result<(), Error> {
     let opt = CommandArgs::from_args();
 
-    let (mut glcim, v) = tokio::runtime::Builder::new_multi_thread()
+    let (mut glim, v) = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .worker_threads(3)
         .build()?
@@ -1648,15 +1648,15 @@ fn main_wrap() -> Result<(), Error> {
                 Err(err) => {
                     Err(err)
                 }
-                Ok(mut glcim) => {
-                    let v = glcim.run().await;
-                    Ok((glcim, v))
+                Ok(mut glim) => {
+                    let v = glim.run().await;
+                    Ok((glim, v))
                 },
             }
         })?;
 
     if !opt.debug && !opt.non_interactive {
-        glcim.release_terminal()?;
+        glim.release_terminal()?;
     }
     v?;
 

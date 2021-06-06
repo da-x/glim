@@ -1,4 +1,4 @@
-all: bin/glcim
+all: bin/glim
 
-bin/glcim: $(shell find -name \*.rs) Cargo.toml
+bin/glim: $(shell find -name \*.rs) Cargo.toml
 	@./build.sh

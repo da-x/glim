@@ -1,4 +1,4 @@
-## `glcim` - Gitlab CI monitor for the terminal
+## `glim` - Gitlab CI monitor for the terminal
 
 Highlights:
 
@@ -17,14 +17,14 @@ See [example config](example-config.toml) in the main directory.
 
 ### Configuration
 
-While `glcim` can work as a standalone program, it can also use the current Git
+While `glim` can work as a standalone program, it can also use the current Git
 branch as default input to commands.
 
 Following configuration of the Git aliases:
 
 ```
-git config --local alias.pipelines '!glcim from-alias pipelines'
-git config --local alias.job '!glcim from-alias job'
+git config --local alias.pipelines '!glim from-alias pipelines'
+git config --local alias.job '!glim from-alias job'
 ```
 
 
@@ -39,10 +39,10 @@ This can be used as such:
 ## Command line
 
 ```
-glcim 0.1.0
+glim 0.1.0
 
 USAGE:
-    glcim [FLAGS] [OPTIONS] <SUBCOMMAND>
+    glim [FLAGS] [OPTIONS] <SUBCOMMAND>
 
 FLAGS:
     -d               Request debug mode - no TUI

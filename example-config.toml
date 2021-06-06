@@ -1,6 +1,6 @@
-# Location: ~/.config/glcim/config.toml
+# Location: ~/.config/glim/config.toml
 #
-# Or on MacOSX: ~/Library/Application\ Support/glcim/config.toml
+# Or on MacOSX: ~/Library/Application\ Support/glim/config.toml
 
 api_key = "<SECRET-KEY>"
 hostname = "your-gitlab-server.com"
@@ -26,7 +26,7 @@ project = "dev/project"
 # open-job.sh script under `helpers` with the `tmux-split` command.
 #
 #     [hooks]
-#     open_job_command = "~/.config/glcim/open-job.sh tmux-split"
+#     open_job_command = "~/.config/glim/open-job.sh tmux-split"
 #
 #
 # ## Matching local repo to remote ref

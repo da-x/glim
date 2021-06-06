@@ -4,7 +4,7 @@
 # Use with tmux in the following manner:
 #
 # [hooks]
-# open_job_command = "~/.config/glcim/open-job.sh tmux-split"
+# open_job_command = "~/.config/glim/open-job.sh tmux-split"
 #
 
 front-program() {

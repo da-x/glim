@@ -2,7 +2,7 @@
 
 set -e
 
-EXENAME=glcim
+EXENAME=glim
 dest=bin/${EXENAME}
 
 while [[ $# != 0 ]] ; do

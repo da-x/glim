@@ -36,6 +36,5 @@ project = "dev/project"
 # `remote_ref_command`. For example, here's a hook to execute `git prop -n`
 # with a fallback to remote tracking branch resolution:
 #
-#     [hooks]:
-#     remote_ref_command = "v=$(git prop -n | grep ^remote-ref: | awk -F' ' '{print $2}'); if [[ ! -z \"${v}\" ]] ; then echo $v ; else git rev-parse --abbrev-ref --symbolic-full-name @{u}; fi"
-
+#     [hooks]
+#     remote_ref_command= "BRANCH=$(git symbolic-ref --short HEAD); v=$(git config --local --get branch.${BRANCH}.remote-ref || true); if [[ ! -z \"${v}\" ]] ; then echo $v ; else git rev-parse --abbrev-ref --symbolic-full-name @{u}; fi"

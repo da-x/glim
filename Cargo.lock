@@ -613,6 +613,7 @@ dependencies = [
  "gitlab",
  "itertools 0.8.2",
  "serde 1.0.123",
+ "serde_json",
  "structopt",
  "thiserror",
  "tokio",

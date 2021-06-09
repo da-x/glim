@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Serialize, Deserialize};
 use gitlab::{AsyncGitlab, GitlabBuilder, api::projects::jobs::JobScope};
 use gitlab::api::{projects, users};
 use gitlab::api::projects::pipelines::PipelineOrderBy;
@@ -50,6 +50,8 @@ pub enum Error {
     CrosstermError(#[from] crossterm::ErrorKind),
     #[error("Command error: {0}")]
     BoxError(#[from] Box<dyn std::error::Error + Send>),
+    #[error("Serde error: {0}")]
+    Serderror(#[from] serde_json::Error),
     #[error("Command error: {0}")]
     Command(String),
     #[error("Query builder error: {0}")]
@@ -58,6 +60,8 @@ pub enum Error {
     NoPipelineFound,
     #[error("No default config file")]
     ConfigFile,
+    #[error("Not enough pipelines")]
+    NotEnoughPipelines,
 }
 
 #[derive(Debug, StructOpt, Clone)]
@@ -94,19 +98,12 @@ struct PipeDiff {
     to: u64,
 }
 
-#[derive(Debug, StructOpt, Clone)]
+#[derive(Debug, Clone)]
 enum RunMode {
-    /// Show all pipelines for a project, or specific to current user
-    #[structopt(name = "pipelines")]
     Pipelines(PipelinesMode),
-
-    /// Show difference between two pipes
-    #[structopt(name = "pipe-diff")]
     PipeDiff(PipeDiff),
-
-    /// Show all jobs related to a given pipeline
-    #[structopt(name = "jobs")]
     Jobs(JobsMode),
+    None,
 }
 
 #[derive(Debug, StructOpt, Clone)]
@@ -143,6 +140,24 @@ enum AliasCommands {
 }
 
 #[derive(Debug, StructOpt, Clone)]
+struct TwoPipelinesReports {
+    /// Report changes from the last two runs
+    #[structopt(name = "ref", short="r")]
+    r#ref: String,
+
+    /// Output file
+    #[structopt(name = "output_path", short="o")]
+    out_path: PathBuf,
+}
+
+#[derive(Debug, StructOpt, Clone)]
+enum ReportCommands {
+    /// Show all jobs for latest pipeline of the current branch
+    #[structopt(name = "pipediff")]
+    TwoPipelinesReports(TwoPipelinesReports),
+}
+
+#[derive(Debug, StructOpt, Clone)]
 enum CommandMode {
     /// Show all pipelines for a project, or specific to current user
     #[structopt(name = "pipelines")]
@@ -158,10 +173,14 @@ enum CommandMode {
 
     /// Interface for a git aliases that are sensitive to Git's state
     #[structopt(name = "from-alias")]
-    FromAlias(AliasCommands)
+    FromAlias(AliasCommands),
+
+    /// Generate some non-interactive reports in JSON output
+    #[structopt(name = "report")]
+    FromReport(ReportCommands),
 }
 
-#[derive(Debug, StructOpt)]
+#[derive(Debug, StructOpt, Clone)]
 struct CommandArgs {
     #[structopt(name = "config-file", short="c")]
     config: Option<PathBuf>,
@@ -213,7 +232,7 @@ struct ConfigHooks {
     remote_ref_command: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Pipeline {
     id: u64,
     status: String,
@@ -224,12 +243,21 @@ struct Pipeline {
     updated_at: DateTime<Local>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TwoPipelines {
+    r#ref: String,
+    from: Pipeline,
+    from_jobs: BTreeMap<String, Job>,
+    to: Pipeline,
+    to_jobs: BTreeMap<String, Job>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct Bridge {
     downstream_pipeline: Option<Pipeline>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 struct Job {
     id: u64,
     name: String,
@@ -441,6 +469,9 @@ impl Thread {
         loop {
             let mut updates : usize = 0;
             match &self.mode {
+                RunMode::None => {
+                    return Ok(());
+                },
                 RunMode::Jobs{..} => {}
                 RunMode::PipeDiff{..} => {},
                 RunMode::Pipelines(info) => {
@@ -488,6 +519,7 @@ impl Thread {
             }
 
             match &self.mode {
+                RunMode::None => {}
                 RunMode::Jobs(info) => {
                     let mut jobs = vec![];
 
@@ -591,6 +623,7 @@ struct Main {
     jobs: Vec<Job>,
     pipediffs: Vec<JobDiff>,
     config: Config,
+    opt: CommandArgs,
     debug: bool,
     leave: bool,
     pipediff_hide_unchanged: bool,
@@ -630,6 +663,47 @@ impl Main {
             CommandMode::Jobs(x) => return Ok(RunMode::Jobs(x)),
             CommandMode::FromAlias(alias) => {
                 alias
+            }
+            CommandMode::FromReport(info) => {
+                match info {
+                    ReportCommands::TwoPipelinesReports(info) => {
+                        let mut endpoint = projects::pipelines::Pipelines::builder();
+                        endpoint.project(config.project.clone());
+                        endpoint.order_by(PipelineOrderBy::Id);
+                        endpoint.ref_(info.r#ref.to_owned());
+                        let endpoint = endpoint.build().map_err(Error::BuilderError)?;
+                        let endpoint = gitlab::api::paged(endpoint, gitlab::api::Pagination::Limit(2));
+                        let pipelines : Vec<Pipeline> = endpoint.query_async(&
+                            *client).await.map_err(|x| Error::BoxError(Box::new(x)))?;
+                        if pipelines.len() < 2 {
+                            return Err(Error::NotEnoughPipelines);
+                        }
+
+                        let to = &pipelines[0];
+                        let from = &pipelines[1];
+
+                        let client2 = client.clone();
+                        let from_jobs = Thread::get_jobs(from.id, &config, &client2);
+                        let to_jobs = Thread::get_jobs(to.id, &config, &client);
+                        let (from_jobs, to_jobs) = futures::join!(from_jobs, to_jobs);
+                        let from_jobs = from_jobs?;
+                        let to_jobs = to_jobs?;
+
+                        use std::io::{Write, BufWriter};
+                        use std::fs::OpenOptions;
+
+                        let file = OpenOptions::new().create(true).write(true).truncate(true).open(info.out_path)?;
+                        let mut file = BufWriter::new(file);
+
+                        let two = TwoPipelines {
+                            r#ref: info.r#ref.clone(),
+                            to: to.clone(), from: from.clone(), to_jobs, from_jobs
+                        };
+
+                        writeln!(&mut file, "{}", serde_json::ser::to_string(&two)?)?;
+                    }
+                }
+                return Ok(RunMode::None);
             }
         };
 
@@ -702,6 +776,7 @@ impl Main {
     }
 
     async fn new(opt: &CommandArgs) -> Result<Self, Error> {
+        let mut opt = (*opt).clone();
         let config_path = if let Some(config) = &opt.config {
             config.clone()
         } else {
@@ -758,6 +833,10 @@ impl Main {
             }.run().await;
         });
 
+        if let RunMode::None = mode {
+            opt.non_interactive = true;
+        };
+
         if !opt.debug && !opt.non_interactive {
             enable_raw_mode()?;
         }
@@ -789,6 +868,7 @@ impl Main {
             first_load: true,
             prev_mode: None,
             mode,
+            opt,
             rsp_recv: Some(rsp_recv),
         })
     }
@@ -803,6 +883,9 @@ impl Main {
                 let mut state = self.state.lock().await;
                 let mut updates = 0;
                 match self.mode {
+                    RunMode::None => {
+                        break;
+                    }
                     RunMode::Pipelines{..} => {
                         if state.pipelines.check_expiry(std::time::Duration::from_millis(10000)) {
                             updates += 1;
@@ -865,6 +948,7 @@ impl Main {
 
     async fn draw(&mut self) -> Result<(), Error> {
         match &self.mode {
+            RunMode::None => { Ok(()) }
             RunMode::PipeDiff(info) => {
                 let info = info.clone();
                 self.draw_pipediff(info).await
@@ -1240,6 +1324,7 @@ impl Main {
         let state = self.state.lock().await;
 
         match self.mode {
+            RunMode::None => { }
             RunMode::Jobs(_) => state.jobs.up(&mut self.selected_job, None),
             RunMode::Pipelines(_) => state.pipelines.up(&mut self.selected_pipeline, None),
             RunMode::PipeDiff{..} => state.pipediff.up(&mut self.selected_pipediff, None),
@@ -1252,6 +1337,7 @@ impl Main {
         let state = self.state.lock().await;
 
         match self.mode {
+            RunMode::None => { }
             RunMode::Jobs(_) => state.jobs.down(&mut self.selected_job, Some(self.jobs.len())),
             RunMode::Pipelines(_) => state.pipelines.down(&mut self.selected_pipeline, Some(self.pipelines.len())),
             RunMode::PipeDiff{..} => state.pipediff.down(&mut self.selected_pipediff, Some(self.pipediffs.len())),
@@ -1264,6 +1350,7 @@ impl Main {
         let state = self.state.lock().await;
 
         match self.mode {
+            RunMode::None => { }
             RunMode::Jobs(_) => state.jobs.home(&mut self.selected_job, None),
             RunMode::Pipelines(_) => state.pipelines.home(&mut self.selected_pipeline, None),
             RunMode::PipeDiff{..} => state.pipediff.home(&mut self.selected_pipediff, None),
@@ -1276,6 +1363,7 @@ impl Main {
         let state = self.state.lock().await;
 
         match self.mode {
+            RunMode::None => { }
             RunMode::Jobs(_) => state.jobs.end(&mut self.selected_job, Some(self.jobs.len())),
             RunMode::Pipelines(_) => state.pipelines.end(&mut self.selected_pipeline, Some(self.pipelines.len())),
             RunMode::PipeDiff{..} => state.pipediff.end(&mut self.selected_pipediff, Some(self.pipediffs.len())),
@@ -1341,6 +1429,7 @@ impl Main {
 
     async fn on_enter(&mut self) -> Result<(), Error> {
         match self.mode {
+            RunMode::None => { }
             RunMode::Jobs(ref info) => {
                 if let Some(selected) = self.selected_job.selected() {
                     if selected < self.jobs.len() {
@@ -1410,6 +1499,7 @@ impl Main {
 
     fn on_o_key(&mut self) -> Result<(), Error> {
         match self.mode {
+            RunMode::None => { }
             RunMode::Jobs(_) => {
                 if let Some(selected) = self.selected_job.selected() {
                     if selected < self.jobs.len() {
@@ -1445,6 +1535,7 @@ impl Main {
 
     fn on_u_key(&mut self) -> Result<(), Error> {
         match &mut self.mode {
+            RunMode::None => { }
             RunMode::Jobs(_) => {}
             RunMode::PipeDiff(_) => {},
             RunMode::Pipelines(info) => {
@@ -1458,6 +1549,7 @@ impl Main {
 
     fn on_p_key(&mut self) -> Result<(), Error> {
         match self.mode {
+            RunMode::None => { }
             RunMode::Jobs(_) => {
             }
             RunMode::PipeDiff(ref info) => {
@@ -1481,8 +1573,8 @@ impl Main {
 
     fn on_delete(&mut self) -> Result<(), Error> {
         match self.mode {
-            RunMode::Jobs(_) => {
-            }
+            RunMode::None => { }
+            RunMode::Jobs(_) => { }
             RunMode::PipeDiff{..} => { },
             RunMode::Pipelines(_) => {
                 if let Some(selected) = self.selected_pipeline.selected() {
@@ -1502,8 +1594,8 @@ impl Main {
 
     fn on_l_key(&mut self) -> Result<(), Error> {
         match self.mode {
-            RunMode::Jobs(_) => {
-            }
+            RunMode::None => { }
+            RunMode::Jobs(_) => { }
             RunMode::PipeDiff{..} => { },
             RunMode::Pipelines(_) => {
                 if let Some(local_repo) = &self.config.local_repo {
@@ -1655,7 +1747,7 @@ fn main_wrap() -> Result<(), Error> {
             }
         })?;
 
-    if !opt.debug && !opt.non_interactive {
+    if !opt.debug && !glim.opt.non_interactive {
         glim.release_terminal()?;
     }
     v?;

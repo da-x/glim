@@ -609,7 +609,7 @@ impl Thread {
 }
 
 struct Main {
-    terminal: Terminal<CrosstermBackend<std::io::Stdout>>,
+    terminal: Option<Terminal<CrosstermBackend<std::io::Stdout>>>,
     state: Arc<Mutex<State>>,
     tx_cmd: mpsc::Sender<RxCmd>,
     rsp_recv: Option<channel::mpsc::Receiver<()>>,
@@ -841,11 +841,13 @@ impl Main {
             enable_raw_mode()?;
         }
         let mut stdout = stdout();
-        if !opt.debug && !opt.non_interactive {
+        let terminal = if !opt.debug && !opt.non_interactive {
             execute!(stdout, EnterAlternateScreen)?;
-        }
-        let backend = CrosstermBackend::new(stdout);
-        let terminal = Terminal::new(backend)?;
+            let backend = CrosstermBackend::new(stdout);
+            Some(Terminal::new(backend)?)
+        } else {
+            None
+        };
 
         Ok(Self {
             terminal,
@@ -874,6 +876,13 @@ impl Main {
     }
 
     async fn run(&mut self) -> Result<(), Error> {
+        match self.mode {
+            RunMode::None => {
+                return Ok(());
+            }
+            _ => {}
+        }
+
         let mut reader = EventStream::new();
         let mut rsp_recv = self.rsp_recv.take().unwrap();
 
@@ -1025,7 +1034,7 @@ impl Main {
         let sparkline = Self::status_line(self.auto_refresh);
         let pipelines_select_for_diff = &self.pipelines_select_for_diff;
 
-        self.terminal.draw(|rect| {
+        self.terminal.as_mut().unwrap().draw(|rect| {
             let mut items: Vec<_> = vec![];
             pipeline_ids.clear();
             let mut widths = vec![
@@ -1177,7 +1186,7 @@ impl Main {
 
         printed_jobs.clear();
 
-        self.terminal.draw(|rect| {
+        self.terminal.as_mut().unwrap().draw(|rect| {
             let mut items: Vec<_> = vec![];
             if let Some((_, jobs)) = &state.jobs.data {
                 for job in jobs.iter() {
@@ -1247,7 +1256,7 @@ impl Main {
         printed_pipediffs.clear();
 
         let pipediff_hide_unchanged = self.pipediff_hide_unchanged;
-        self.terminal.draw(|rect| {
+        self.terminal.as_mut().unwrap().draw(|rect| {
             let mut items: Vec<_> = vec![];
             if let Some((_, pipediff)) = &state.pipediff.data {
                 for pipediff in pipediff.iter() {
@@ -1612,7 +1621,7 @@ impl Main {
                                 let _ = v.wait();
                             }
                             self.gain_terminal()?;
-                            self.terminal.clear()?;
+                            self.terminal.as_mut().unwrap().clear()?;
                         }
                     }
                 }
@@ -1720,10 +1729,10 @@ impl Main {
     fn release_terminal(&mut self) -> Result<(), Error> {
         disable_raw_mode()?;
         execute!(
-            self.terminal.backend_mut(),
+            self.terminal.as_mut().unwrap().backend_mut(),
             LeaveAlternateScreen,
         )?;
-        self.terminal.show_cursor()?;
+        self.terminal.as_mut().unwrap().show_cursor()?;
         Ok(())
     }
 }

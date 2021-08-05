@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::io::stdout;
 use crossterm::{
-    event::{Event as CEvent, EventStream},
+    event::{Event as CEvent, KeyCode, EventStream},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, Clear, EnterAlternateScreen, LeaveAlternateScreen, ClearType},
 };
@@ -25,6 +25,8 @@ use tui::style::Modifier;
 use tui::widgets::{Table, Cell, Row, BorderType};
 use tui::layout::{Direction, Layout};
 use tokio::sync::Mutex;
+
+use masof::keyaction::KeyMap;
 
 mod bridges;
 
@@ -608,6 +610,29 @@ impl Thread {
     }
 }
 
+enum Action {
+    Quit,
+    Clear,
+    Diff,
+    RefreshToggle,
+    HideUnchanged,
+    Up,
+    Down,
+    PageUp,
+    PageDown,
+    Home,
+    End,
+    Delete,
+    SetFromDiff,
+    SetToDiff,
+    GoBack,
+    Enter,
+    OpenInBrowser,
+    OpenPreviousInBrowser,
+    GitLog,
+    ToggleUsernameResolve,
+}
+
 struct Main {
     terminal: Option<Terminal<CrosstermBackend<std::io::Stdout>>>,
     state: Arc<Mutex<State>>,
@@ -623,6 +648,7 @@ struct Main {
     jobs: Vec<Job>,
     pipediffs: Vec<JobDiff>,
     config: Config,
+    key_map: KeyMap<Action>,
     opt: CommandArgs,
     debug: bool,
     leave: bool,
@@ -869,6 +895,7 @@ impl Main {
             auto_refresh: !opt.disable_auto_refresh,
             first_load: true,
             prev_mode: None,
+            key_map: KeyMap::new(),
             mode,
             opt,
             rsp_recv: Some(rsp_recv),
@@ -882,6 +909,27 @@ impl Main {
             }
             _ => {}
         }
+
+        self.key_map.add_no_mods(KeyCode::Up, Action::Up);
+        self.key_map.add_no_mods(KeyCode::Down, Action::Down);
+        self.key_map.add_no_mods(KeyCode::Char('q'), Action::Quit);
+        self.key_map.add_no_mods(KeyCode::Char('c'), Action::Clear);
+        self.key_map.add_no_mods(KeyCode::Char('d'), Action::Diff);
+        self.key_map.add_no_mods(KeyCode::Char('r'), Action::RefreshToggle);
+        self.key_map.add_no_mods(KeyCode::Char('h'), Action::HideUnchanged);
+        self.key_map.add_no_mods(KeyCode::PageUp, Action::PageUp);
+        self.key_map.add_no_mods(KeyCode::PageDown, Action::PageDown);
+        self.key_map.add_no_mods(KeyCode::Home, Action::Home);
+        self.key_map.add_no_mods(KeyCode::End, Action::End);
+        self.key_map.add_no_mods(KeyCode::Delete, Action::Delete);
+        self.key_map.add_no_mods(KeyCode::Char('f'), Action::SetFromDiff);
+        self.key_map.add_no_mods(KeyCode::Char('t'), Action::SetToDiff);
+        self.key_map.add_no_mods(KeyCode::Backspace, Action::GoBack);
+        self.key_map.add_no_mods(KeyCode::Enter, Action::Enter);
+        self.key_map.add_no_mods(KeyCode::Char('o'), Action::OpenInBrowser);
+        self.key_map.add_no_mods(KeyCode::Char('p'), Action::OpenPreviousInBrowser);
+        self.key_map.add_no_mods(KeyCode::Char('l'), Action::GitLog);
+        self.key_map.add_no_mods(KeyCode::Char('u'), Action::ToggleUsernameResolve);
 
         let mut reader = EventStream::new();
         let mut rsp_recv = self.rsp_recv.take().unwrap();
@@ -1355,7 +1403,7 @@ impl Main {
         Ok(())
     }
 
-    async fn on_home(&mut self) -> Result<(), Error> {
+    async fn goto_top_of_list(&mut self) -> Result<(), Error> {
         let state = self.state.lock().await;
 
         match self.mode {
@@ -1368,7 +1416,7 @@ impl Main {
         Ok(())
     }
 
-    async fn on_end(&mut self) -> Result<(), Error> {
+    async fn goto_end_of_list(&mut self) -> Result<(), Error> {
         let state = self.state.lock().await;
 
         match self.mode {
@@ -1381,7 +1429,7 @@ impl Main {
         Ok(())
     }
 
-    fn on_backspace(&mut self) -> Result<(), Error> {
+    fn go_to_previous_mode(&mut self) -> Result<(), Error> {
         if let Some(mode) = self.prev_mode.take() {
             self.mode = mode;
             self.first_load = true;
@@ -1506,7 +1554,7 @@ impl Main {
         Ok(())
     }
 
-    fn on_o_key(&mut self) -> Result<(), Error> {
+    fn open_browser(&mut self) -> Result<(), Error> {
         match self.mode {
             RunMode::None => { }
             RunMode::Jobs(_) => {
@@ -1542,7 +1590,7 @@ impl Main {
         Ok(())
     }
 
-    fn on_u_key(&mut self) -> Result<(), Error> {
+    fn toggle_username_resolve(&mut self) -> Result<(), Error> {
         match &mut self.mode {
             RunMode::None => { }
             RunMode::Jobs(_) => {}
@@ -1556,7 +1604,7 @@ impl Main {
         Ok(())
     }
 
-    fn on_p_key(&mut self) -> Result<(), Error> {
+    fn open_previous(&mut self) -> Result<(), Error> {
         match self.mode {
             RunMode::None => { }
             RunMode::Jobs(_) => {
@@ -1580,7 +1628,7 @@ impl Main {
         Ok(())
     }
 
-    fn on_delete(&mut self) -> Result<(), Error> {
+    fn ignore_pipeline(&mut self) -> Result<(), Error> {
         match self.mode {
             RunMode::None => { }
             RunMode::Jobs(_) => { }
@@ -1601,7 +1649,7 @@ impl Main {
         Ok(())
     }
 
-    fn on_l_key(&mut self) -> Result<(), Error> {
+    fn open_git_log(&mut self) -> Result<(), Error> {
         match self.mode {
             RunMode::None => { }
             RunMode::Jobs(_) => { }
@@ -1634,14 +1682,16 @@ impl Main {
     async fn on_event(&mut self, event: CEvent) -> Result<(), Error> {
         match event {
             CEvent::Key(key_event) => {
-                match key_event.code {
-                    crossterm::event::KeyCode::Char('q') => {
-                        self.leave = true;
-                    },
-                    crossterm::event::KeyCode::Char('c') => {
-                        self.ignored_pipeline_ids.clear();
-                    },
-                    crossterm::event::KeyCode::Char('d') => {
+                let action = if let Some(action) = self.key_map.get_action(key_event) {
+                    action
+                } else {
+                    return Ok(());
+                };
+
+                match action {
+                    Action::Quit => self.leave = true,
+                    Action::Clear => self.ignored_pipeline_ids.clear(),
+                    Action::Diff => {
                         if self.pipelines_select_for_diff.is_some() {
                             self.pipelines_select_for_diff = None;
                         } else {
@@ -1654,63 +1704,31 @@ impl Main {
                             }
                         }
                     },
-
-                    crossterm::event::KeyCode::Char('r') => {
-                        self.auto_refresh = !self.auto_refresh;
-                    },
-                    crossterm::event::KeyCode::Char('h') => {
-                        self.pipediff_hide_unchanged = !self.pipediff_hide_unchanged;
-                    },
-                    crossterm::event::KeyCode::Char('l') => {
-                        self.on_l_key()?;
-                    },
-                    crossterm::event::KeyCode::Char('p') => {
-                        self.on_p_key()?;
-                    },
-                    crossterm::event::KeyCode::Enter => {
-                        self.on_enter().await?;
-                    },
-                    crossterm::event::KeyCode::Char('o') => {
-                        self.on_o_key()?;
-                    },
-                    crossterm::event::KeyCode::Char('u') => {
-                        self.on_u_key()?;
-                    },
-                    crossterm::event::KeyCode::Backspace => {
-                        self.on_backspace()?;
-                    },
-                    crossterm::event::KeyCode::Char('t') => {
-                        self.on_set_pipediff_range(false)?;
-                    },
-                    crossterm::event::KeyCode::Char('f') => {
-                        self.on_set_pipediff_range(true)?;
-                    },
-                    crossterm::event::KeyCode::Delete => {
-                        self.on_delete()?;
-                    },
-                    crossterm::event::KeyCode::Up => {
-                        self.on_up().await?;
-                    },
-                    crossterm::event::KeyCode::Down => {
-                        self.on_down().await?;
-                    },
-                    crossterm::event::KeyCode::PageUp => {
+                    Action::RefreshToggle => self.auto_refresh = !self.auto_refresh,
+                    Action::HideUnchanged => self.pipediff_hide_unchanged = !self.pipediff_hide_unchanged,
+                    Action::Up => self.on_up().await?,
+                    Action::Down => self.on_down().await?,
+                    Action::PageUp => {
                         for _ in 0..crossterm::terminal::size()?.1.saturating_sub(2) {
                             self.on_up().await?;
                         }
                     },
-                    crossterm::event::KeyCode::PageDown => {
+                    Action::PageDown => {
                         for _ in 0..crossterm::terminal::size()?.1.saturating_sub(2) {
                             self.on_down().await?;
                         }
                     },
-                    crossterm::event::KeyCode::Home => {
-                        self.on_home().await?;
-                    },
-                    crossterm::event::KeyCode::End => {
-                        self.on_end().await?;
-                    },
-                    _ => { }
+                    Action::Home => self.goto_top_of_list().await?,
+                    Action::End => self.goto_end_of_list().await?,
+                    Action::Delete => self.ignore_pipeline()?,
+                    Action::GoBack => self.go_to_previous_mode()?,
+                    Action::SetToDiff => self.on_set_pipediff_range(false)?,
+                    Action::SetFromDiff => self.on_set_pipediff_range(true)?,
+                    Action::Enter => self.on_enter().await?,
+                    Action::OpenInBrowser => self.open_browser()?,
+                    Action::OpenPreviousInBrowser => self.open_previous()?,
+                    Action::GitLog => self.open_git_log()?,
+                    Action::ToggleUsernameResolve => self.toggle_username_resolve()?,
                 }
             }
             _ => {},

@@ -935,8 +935,8 @@ dependencies = [
 
 [[package]]
 name = "masof"
-version = "0.1.0"
-source = "git+https://github.com/da-x/masof?rev=v0.1#4c7bfbf661f47f2fc80ac546ee1c87e4ef869770"
+version = "0.1.1"
+source = "git+https://github.com/da-x/masof?rev=v0.1.1#c4c6024b9089541fd125480f0d183d5b0f4d1b2e"
 dependencies = [
  "ansi_term 0.12.1",
  "crossterm 0.19.0",

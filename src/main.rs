@@ -22,13 +22,14 @@ use tui::widgets::{Block, Borders, Sparkline};
 use tui::layout::Constraint;
 use futures_timer::Delay;
 use tui::style::Modifier;
-use tui::widgets::{Table, Cell, Row, BorderType};
+use tui::widgets::{Table, Cell, Row, BorderType, List, ListItem};
 use tui::layout::{Direction, Layout};
 use tokio::sync::Mutex;
 
 use masof::keyaction::KeyMap;
 
 mod bridges;
+mod util;
 
 use futures::{
     channel,
@@ -105,6 +106,7 @@ enum RunMode {
     Pipelines(PipelinesMode),
     PipeDiff(PipeDiff),
     Jobs(JobsMode),
+    Help,
     None,
 }
 
@@ -474,6 +476,9 @@ impl Thread {
                 RunMode::None => {
                     return Ok(());
                 },
+                RunMode::Help => {
+                    return Ok(());
+                },
                 RunMode::Jobs{..} => {}
                 RunMode::PipeDiff{..} => {},
                 RunMode::Pipelines(info) => {
@@ -522,6 +527,7 @@ impl Thread {
 
             match &self.mode {
                 RunMode::None => {}
+                RunMode::Help => {}
                 RunMode::Jobs(info) => {
                     let mut jobs = vec![];
 
@@ -610,14 +616,17 @@ impl Thread {
     }
 }
 
+#[derive(Ord, PartialOrd, Eq, PartialEq)]
 enum Action {
     Quit,
+    QuitOrGoBack,
     Clear,
     Diff,
     RefreshToggle,
     HideUnchanged,
     Up,
     Down,
+    Help,
     PageUp,
     PageDown,
     Home,
@@ -633,6 +642,37 @@ enum Action {
     ToggleUsernameResolve,
 }
 
+impl std::fmt::Display for Action {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+        let s = match self {
+            Action::Quit => "Quit program",
+            Action::QuitOrGoBack => "Go to previous mode or quit",
+            Action::Clear => "Clear hidden items",
+            Action::Diff => "Diff selected pipelines",
+            Action::RefreshToggle => "Toggle auto-refresh",
+            Action::HideUnchanged => "In pipediff: toggle visibility of unchanged items",
+            Action::Up => "Up one item",
+            Action::Down => "Down one item",
+            Action::Help => "Help screen",
+            Action::PageUp => "Page up in list",
+            Action::PageDown => "Page down in list",
+            Action::Home => "Go to beginning of list",
+            Action::End => "Go to end of list",
+            Action::Delete => "Hide list item",
+            Action::SetFromDiff => "Set 'from' pipe for diff",
+            Action::SetToDiff => "Set 'to' pipe for diff",
+            Action::GoBack => "Go back to previous screen",
+            Action::Enter => "Enter pipeline or job log",
+            Action::OpenInBrowser => "Open job or pipeline in browser",
+            Action::OpenPreviousInBrowser => "In pipediff, open previous job in browser",
+            Action::GitLog => "Open git commit",
+            Action::ToggleUsernameResolve => "Toggle username load when listing other users pipelines",
+        };
+        write!(f, "{}", s)?;
+        Ok(())
+    }
+}
+
 struct Main {
     terminal: Option<Terminal<CrosstermBackend<std::io::Stdout>>>,
     state: Arc<Mutex<State>>,
@@ -643,12 +683,13 @@ struct Main {
     selected_pipeline: tui::widgets::TableState,
     selected_job: tui::widgets::TableState,
     selected_pipediff: tui::widgets::TableState,
+    help: util::StatefulList<String>,
+    key_map: KeyMap<Action>,
     ignored_pipeline_ids: std::collections::HashSet<u64>,
     pipelines: Vec<Pipeline>,
     jobs: Vec<Job>,
     pipediffs: Vec<JobDiff>,
     config: Config,
-    key_map: KeyMap<Action>,
     opt: CommandArgs,
     debug: bool,
     leave: bool,
@@ -896,6 +937,7 @@ impl Main {
             first_load: true,
             prev_mode: None,
             key_map: KeyMap::new(),
+            help: util::StatefulList::new(),
             mode,
             opt,
             rsp_recv: Some(rsp_recv),
@@ -910,9 +952,10 @@ impl Main {
             _ => {}
         }
 
+        self.key_map.add_no_mods(KeyCode::F(1), Action::Help);
         self.key_map.add_no_mods(KeyCode::Up, Action::Up);
         self.key_map.add_no_mods(KeyCode::Down, Action::Down);
-        self.key_map.add_no_mods(KeyCode::Char('q'), Action::Quit);
+        self.key_map.add_no_mods(KeyCode::Char('q'), Action::QuitOrGoBack);
         self.key_map.add_no_mods(KeyCode::Char('c'), Action::Clear);
         self.key_map.add_no_mods(KeyCode::Char('d'), Action::Diff);
         self.key_map.add_no_mods(KeyCode::Char('r'), Action::RefreshToggle);
@@ -925,11 +968,20 @@ impl Main {
         self.key_map.add_no_mods(KeyCode::Char('f'), Action::SetFromDiff);
         self.key_map.add_no_mods(KeyCode::Char('t'), Action::SetToDiff);
         self.key_map.add_no_mods(KeyCode::Backspace, Action::GoBack);
+        self.key_map.add_no_mods(KeyCode::Esc, Action::GoBack);
         self.key_map.add_no_mods(KeyCode::Enter, Action::Enter);
         self.key_map.add_no_mods(KeyCode::Char('o'), Action::OpenInBrowser);
         self.key_map.add_no_mods(KeyCode::Char('p'), Action::OpenPreviousInBrowser);
         self.key_map.add_no_mods(KeyCode::Char('l'), Action::GitLog);
         self.key_map.add_no_mods(KeyCode::Char('u'), Action::ToggleUsernameResolve);
+        self.key_map.add_ctrl(KeyCode::Char('c'), Action::Quit);
+
+        self.help = util::StatefulList::with_items({
+            let mut s = String::new();
+            self.key_map.describe(&mut s);
+            s.lines().map(|x| x.to_owned()).collect()
+        });
+
 
         let mut reader = EventStream::new();
         let mut rsp_recv = self.rsp_recv.take().unwrap();
@@ -943,6 +995,7 @@ impl Main {
                     RunMode::None => {
                         break;
                     }
+                    RunMode::Help => { }
                     RunMode::Pipelines{..} => {
                         if state.pipelines.check_expiry(std::time::Duration::from_millis(10000)) {
                             updates += 1;
@@ -1011,6 +1064,7 @@ impl Main {
                 self.draw_pipediff(info).await
             }
             RunMode::Pipelines(info) => { let info = info.clone(); self.draw_pipelines(info).await },
+            RunMode::Help => self.draw_help().await,
             RunMode::Jobs{..} => self.draw_jobs().await,
         }
     }
@@ -1051,9 +1105,9 @@ impl Main {
             .block(Block::default().title({
                 let mut s = String::new();
                 if auto_refresh {
-                    s += "Auto-refresh: enabled ('r' to toggle)";
+                    s += "F1 for help | Auto-refresh: enabled";
                 } else {
-                    s += "Auto-refresh: disabled ('r' to toggle)";
+                    s += "F1 for help | Auto-refresh: disabled";
                 }
                 s
             }))
@@ -1293,6 +1347,28 @@ impl Main {
         Ok(())
     }
 
+    async fn draw_help(&mut self) -> Result<(), Error> {
+        let help = &mut self.help;
+
+        self.terminal.as_mut().unwrap().draw(|rect| {
+            let items: Vec<_> =
+                help.items.iter().map(|x| ListItem::new(x.clone())).collect();
+            let help_list = List::new(items)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .style(Style::default().fg(Color::White))
+                    .title("Help")
+                    .border_type(BorderType::Plain),
+            );
+
+            let chunks = Self::divide_for_status_line(rect.size());
+            rect.render_stateful_widget(help_list, chunks[0], &mut help.state);
+        })?;
+
+        Ok(())
+    }
+
     async fn draw_pipediff(&mut self, info: PipeDiff) -> Result<(), Error> {
         let sparkline = Self::status_line(self.auto_refresh);
         let state = self.state.lock().await;
@@ -1381,6 +1457,7 @@ impl Main {
         let state = self.state.lock().await;
 
         match self.mode {
+            RunMode::Help => self.help.previous(),
             RunMode::None => { }
             RunMode::Jobs(_) => state.jobs.up(&mut self.selected_job, None),
             RunMode::Pipelines(_) => state.pipelines.up(&mut self.selected_pipeline, None),
@@ -1395,6 +1472,7 @@ impl Main {
 
         match self.mode {
             RunMode::None => { }
+            RunMode::Help => self.help.next(),
             RunMode::Jobs(_) => state.jobs.down(&mut self.selected_job, Some(self.jobs.len())),
             RunMode::Pipelines(_) => state.pipelines.down(&mut self.selected_pipeline, Some(self.pipelines.len())),
             RunMode::PipeDiff{..} => state.pipediff.down(&mut self.selected_pipediff, Some(self.pipediffs.len())),
@@ -1407,7 +1485,8 @@ impl Main {
         let state = self.state.lock().await;
 
         match self.mode {
-            RunMode::None => { }
+            RunMode::None => {}
+            RunMode::Help => {}
             RunMode::Jobs(_) => state.jobs.home(&mut self.selected_job, None),
             RunMode::Pipelines(_) => state.pipelines.home(&mut self.selected_pipeline, None),
             RunMode::PipeDiff{..} => state.pipediff.home(&mut self.selected_pipediff, None),
@@ -1420,7 +1499,8 @@ impl Main {
         let state = self.state.lock().await;
 
         match self.mode {
-            RunMode::None => { }
+            RunMode::Help => {}
+            RunMode::None => {}
             RunMode::Jobs(_) => state.jobs.end(&mut self.selected_job, Some(self.jobs.len())),
             RunMode::Pipelines(_) => state.pipelines.end(&mut self.selected_pipeline, Some(self.pipelines.len())),
             RunMode::PipeDiff{..} => state.pipediff.end(&mut self.selected_pipediff, Some(self.pipediffs.len())),
@@ -1487,6 +1567,7 @@ impl Main {
     async fn on_enter(&mut self) -> Result<(), Error> {
         match self.mode {
             RunMode::None => { }
+            RunMode::Help => {}
             RunMode::Jobs(ref info) => {
                 if let Some(selected) = self.selected_job.selected() {
                     if selected < self.jobs.len() {
@@ -1556,7 +1637,8 @@ impl Main {
 
     fn open_browser(&mut self) -> Result<(), Error> {
         match self.mode {
-            RunMode::None => { }
+            RunMode::None => {}
+            RunMode::Help => {}
             RunMode::Jobs(_) => {
                 if let Some(selected) = self.selected_job.selected() {
                     if selected < self.jobs.len() {
@@ -1592,7 +1674,8 @@ impl Main {
 
     fn toggle_username_resolve(&mut self) -> Result<(), Error> {
         match &mut self.mode {
-            RunMode::None => { }
+            RunMode::None => {}
+            RunMode::Help => {}
             RunMode::Jobs(_) => {}
             RunMode::PipeDiff(_) => {},
             RunMode::Pipelines(info) => {
@@ -1606,9 +1689,9 @@ impl Main {
 
     fn open_previous(&mut self) -> Result<(), Error> {
         match self.mode {
-            RunMode::None => { }
-            RunMode::Jobs(_) => {
-            }
+            RunMode::None => {}
+            RunMode::Help => {}
+            RunMode::Jobs(_) => {}
             RunMode::PipeDiff(ref info) => {
                 if let Some(selected) = self.selected_pipediff.selected() {
                     if selected < self.pipediffs.len() {
@@ -1621,8 +1704,7 @@ impl Main {
                     }
                 }
             },
-            RunMode::Pipelines(_) => {
-            }
+            RunMode::Pipelines(_) => {}
         }
 
         Ok(())
@@ -1631,6 +1713,7 @@ impl Main {
     fn ignore_pipeline(&mut self) -> Result<(), Error> {
         match self.mode {
             RunMode::None => { }
+            RunMode::Help => {}
             RunMode::Jobs(_) => { }
             RunMode::PipeDiff{..} => { },
             RunMode::Pipelines(_) => {
@@ -1652,6 +1735,7 @@ impl Main {
     fn open_git_log(&mut self) -> Result<(), Error> {
         match self.mode {
             RunMode::None => { }
+            RunMode::Help => {}
             RunMode::Jobs(_) => { }
             RunMode::PipeDiff{..} => { },
             RunMode::Pipelines(_) => {
@@ -1689,7 +1773,15 @@ impl Main {
                 };
 
                 match action {
+                    Action::Help => self.prev_mode = Some(std::mem::replace(&mut self.mode, RunMode::Help)),
                     Action::Quit => self.leave = true,
+                    Action::QuitOrGoBack => {
+                        if self.prev_mode.is_some() {
+                            self.go_to_previous_mode()?
+                        } else {
+                            self.leave = true;
+                        }
+                    },
                     Action::Clear => self.ignored_pipeline_ids.clear(),
                     Action::Diff => {
                         if self.pipelines_select_for_diff.is_some() {

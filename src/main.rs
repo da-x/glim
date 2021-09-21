@@ -792,31 +792,7 @@ impl Main {
 
         match alias {
             AliasCommands::Jobs(info) => {
-                let pipeline_id = if let Some(id) = info.pipeline_id {
-                    id
-                } else {
-                    let remote_ref = Self::get_remote_branch(config)?;
-
-                    let mut endpoint = projects::pipelines::Pipelines::builder();
-                    endpoint.project(config.project.clone());
-                    endpoint.order_by(PipelineOrderBy::Id);
-                    endpoint.ref_(remote_ref.to_owned());
-                    let endpoint = endpoint.build().map_err(Error::BuilderError)?;
-                    let endpoint = gitlab::api::paged(endpoint, gitlab::api::Pagination::Limit(1));
-
-                    let mut pipelines: Vec<Pipeline> = endpoint
-                        .query_async(client)
-                        .await
-                        .map_err(|x| Error::BoxError(Box::new(x)))?;
-
-                    if let Some(pipeline) = pipelines.pop() {
-                        pipeline.id
-                    } else {
-                        return Err(Error::NoPipelineFound);
-                    }
-                };
-
-                return Ok(RunMode::Jobs(JobsMode { pipeline_id }));
+                Ok(Self::alias_job(info, config, client).await?)
             }
             AliasCommands::Pipelines(info) => {
                 let nr_pipelines = 50;
@@ -1670,6 +1646,34 @@ impl Main {
         }
 
         Ok(())
+    }
+
+    async fn alias_job(info: AliasJobsMode, config: &Config, client: &AsyncGitlab) -> Result<RunMode, Error> {
+        let pipeline_id = if let Some(id) = info.pipeline_id {
+            id
+        } else {
+            let remote_ref = Self::get_remote_branch(config)?;
+
+            let mut endpoint = projects::pipelines::Pipelines::builder();
+            endpoint.project(config.project.clone());
+            endpoint.order_by(PipelineOrderBy::Id);
+            endpoint.ref_(remote_ref.to_owned());
+            let endpoint = endpoint.build().map_err(Error::BuilderError)?;
+            let endpoint = gitlab::api::paged(endpoint, gitlab::api::Pagination::Limit(1));
+
+            let mut pipelines: Vec<Pipeline> = endpoint
+                .query_async(client)
+                .await
+                .map_err(|x| Error::BoxError(Box::new(x)))?;
+
+            if let Some(pipeline) = pipelines.pop() {
+                pipeline.id
+            } else {
+                return Err(Error::NoPipelineFound);
+            }
+        };
+
+        Ok(RunMode::Jobs(JobsMode { pipeline_id }))
     }
 
     fn on_job_open_in_browser(&self, job_id: u64) -> Result<(), Error> {

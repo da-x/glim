@@ -114,6 +114,14 @@ struct AliasJobsMode {
     /// Use a specific pipeline number
     #[structopt(name = "pipeline-id", short = "p")]
     pipeline_id: Option<u64>,
+
+    /// Wait for a new pipeline to be created, no older than given seconds
+    #[structopt(name = "wait-by-creation-time", short = "w")]
+    wait_by_creation_time: Option<u64>,
+
+    /// Wait for a new pipeline to be created, of the given hash
+    #[structopt(name = "wait-by-githash", short = "h")]
+    wait_by_githash: Option<String>,
 }
 
 #[derive(Debug, StructOpt, Clone)]
@@ -1652,24 +1660,61 @@ impl Main {
         let pipeline_id = if let Some(id) = info.pipeline_id {
             id
         } else {
-            let remote_ref = Self::get_remote_branch(config)?;
+            let mut iterations = 0;
 
-            let mut endpoint = projects::pipelines::Pipelines::builder();
-            endpoint.project(config.project.clone());
-            endpoint.order_by(PipelineOrderBy::Id);
-            endpoint.ref_(remote_ref.to_owned());
-            let endpoint = endpoint.build().map_err(Error::BuilderError)?;
-            let endpoint = gitlab::api::paged(endpoint, gitlab::api::Pagination::Limit(1));
+            loop {
+                let remote_ref = Self::get_remote_branch(config)?;
 
-            let mut pipelines: Vec<Pipeline> = endpoint
-                .query_async(client)
-                .await
-                .map_err(|x| Error::BoxError(Box::new(x)))?;
+                let mut endpoint = projects::pipelines::Pipelines::builder();
+                endpoint.project(config.project.clone());
+                endpoint.order_by(PipelineOrderBy::Id);
+                endpoint.ref_(remote_ref.to_owned());
+                let endpoint = endpoint.build().map_err(Error::BuilderError)?;
+                let endpoint = gitlab::api::paged(endpoint, gitlab::api::Pagination::Limit(1));
 
-            if let Some(pipeline) = pipelines.pop() {
-                pipeline.id
-            } else {
-                return Err(Error::NoPipelineFound);
+                let mut pipelines: Vec<Pipeline> = endpoint
+                    .query_async(client)
+                    .await
+                    .map_err(|x| Error::BoxError(Box::new(x)))?;
+
+                if info.wait_by_githash.is_some() || info.wait_by_creation_time.is_some() {
+                    let is_old_or_non_existant = if let Some(pipeline) = pipelines.first() {
+                        if let Some(max_time) = info.wait_by_creation_time {
+                            let timediff = Local::now().time() - pipeline.created_at.time();
+                            timediff.num_seconds() >= max_time as i64 // Old pipe
+                        } else if let Some(githash) = &info.wait_by_githash {
+                            &pipeline.sha != githash // Old pipe, not the githash we want
+                        } else {
+                            false
+                        }
+                    } else {
+                        true
+                    };
+
+                    if is_old_or_non_existant {
+                        use tokio::time::sleep;
+                        if iterations == 0 {
+                            let kind = if let Some(max_time) = info.wait_by_creation_time {
+                                format!(" (no older than {} seconds)", max_time)
+                            } else if let Some(githash) = &info.wait_by_githash {
+                                format!(" (of githash {})", githash)
+                            } else {
+                                format!("")
+                            };
+
+                            println!("glim: waiting for a new pipeline to be created{}", kind);
+                        }
+                        sleep(Duration::from_millis(1000)).await;
+                        iterations += 1;
+                        continue;
+                    }
+                }
+
+                if let Some(pipeline) = pipelines.pop() {
+                    break pipeline.id;
+                } else {
+                    return Err(Error::NoPipelineFound);
+                }
             }
         };
 

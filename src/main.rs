@@ -1,41 +1,40 @@
-use serde::{Serialize, Deserialize};
-use gitlab::{AsyncGitlab, GitlabBuilder, api::projects::jobs::JobScope};
-use gitlab::api::{projects, users};
+use chrono::{DateTime, Local};
+use crossterm::{
+    event::{Event as CEvent, EventStream, KeyCode},
+    execute,
+    terminal::{
+        disable_raw_mode, enable_raw_mode, Clear, ClearType, EnterAlternateScreen,
+        LeaveAlternateScreen,
+    },
+};
+use futures_timer::Delay;
 use gitlab::api::projects::pipelines::PipelineOrderBy;
 use gitlab::api::AsyncQuery;
+use gitlab::api::{projects, users};
+use gitlab::{api::projects::jobs::JobScope, AsyncGitlab, GitlabBuilder};
+use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, VecDeque};
-use chrono::{DateTime, Local};
-use thiserror::Error;
-use structopt::StructOpt;
+use std::io::stdout;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::io::stdout;
-use crossterm::{
-    event::{Event as CEvent, KeyCode, EventStream},
-    execute,
-    terminal::{disable_raw_mode, enable_raw_mode, Clear, EnterAlternateScreen, LeaveAlternateScreen, ClearType},
-};
 use std::time::{Duration, Instant};
-use tui::Terminal;
-use tui::backend::CrosstermBackend;
-use tui::widgets::{Block, Borders, Sparkline};
-use tui::layout::Constraint;
-use futures_timer::Delay;
-use tui::style::Modifier;
-use tui::widgets::{Table, Cell, Row, BorderType, List, ListItem};
-use tui::layout::{Direction, Layout};
+use structopt::StructOpt;
+use thiserror::Error;
 use tokio::sync::Mutex;
+use tui::backend::CrosstermBackend;
+use tui::layout::Constraint;
+use tui::layout::{Direction, Layout};
+use tui::style::Modifier;
+use tui::widgets::{Block, Borders, Sparkline};
+use tui::widgets::{BorderType, Cell, List, ListItem, Row, Table};
+use tui::Terminal;
 
 use masof::keyaction::KeyMap;
 
 mod bridges;
 mod util;
 
-use futures::{
-    channel,
-    channel::mpsc,
-    future::FutureExt, select, StreamExt,
-};
+use futures::{channel, channel::mpsc, future::FutureExt, select, StreamExt};
 
 #[derive(Error, Debug)]
 pub enum Error {
@@ -70,25 +69,25 @@ pub enum Error {
 #[derive(Debug, StructOpt, Clone)]
 struct PipelinesMode {
     /// Show the pipelines of all users, not the only the invocing user
-    #[structopt(name = "all-users", short="a")]
+    #[structopt(name = "all-users", short = "a")]
     all_users: bool,
 
     /// Number of pipelines to fetch
-    #[structopt(name = "nr-pipelines", short="n", default_value="200")]
+    #[structopt(name = "nr-pipelines", short = "n", default_value = "200")]
     nr_pipelines: usize,
 
     /// Avoid resolving usernames when showing pipelines of all users (slow!)
-    #[structopt(name = "usernames-resolve", short="u")]
+    #[structopt(name = "usernames-resolve", short = "u")]
     resolve_usernames: bool,
 
     /// The git branch on which to show pipelines (if not specified - show all refs)
-    #[structopt(name = "ref", short="r")]
+    #[structopt(name = "ref", short = "r")]
     r#ref: Option<String>,
 }
 
 #[derive(Debug, StructOpt, Clone)]
 struct JobsMode {
-    #[structopt(name = "pipeline-id", short="p")]
+    #[structopt(name = "pipeline-id", short = "p")]
     pipeline_id: u64,
 }
 
@@ -113,22 +112,22 @@ enum RunMode {
 #[derive(Debug, StructOpt, Clone)]
 struct AliasJobsMode {
     /// Use a specific pipeline number
-    #[structopt(name = "pipeline-id", short="p")]
+    #[structopt(name = "pipeline-id", short = "p")]
     pipeline_id: Option<u64>,
 }
 
 #[derive(Debug, StructOpt, Clone)]
 struct AliasPipelines {
     /// Your pipelines on all your branches instead of current one
-    #[structopt(name = "all", short="a")]
+    #[structopt(name = "all", short = "a")]
     all_refs: bool,
 
     /// Show pipeines on specific ref
-    #[structopt(name = "ref", short="r")]
+    #[structopt(name = "ref", short = "r")]
     specific_ref: Option<String>,
 
     /// Everyone's pipelines
-    #[structopt(name = "everyone", short="e")]
+    #[structopt(name = "everyone", short = "e")]
     everyone: bool,
 }
 
@@ -146,11 +145,11 @@ enum AliasCommands {
 #[derive(Debug, StructOpt, Clone)]
 struct TwoPipelinesReports {
     /// Report changes from the last two runs
-    #[structopt(name = "ref", short="r")]
+    #[structopt(name = "ref", short = "r")]
     r#ref: String,
 
     /// Output file
-    #[structopt(name = "output_path", short="o")]
+    #[structopt(name = "output_path", short = "o")]
     out_path: PathBuf,
 }
 
@@ -186,19 +185,19 @@ enum CommandMode {
 
 #[derive(Debug, StructOpt, Clone)]
 struct CommandArgs {
-    #[structopt(name = "config-file", short="c")]
+    #[structopt(name = "config-file", short = "c")]
     config: Option<PathBuf>,
 
     /// Request debug mode - no TUI
-    #[structopt(name = "debug", short="d")]
+    #[structopt(name = "debug", short = "d")]
     debug: bool,
 
     /// Non-interactive mode - print data and exit
-    #[structopt(name = "non-interactive", short="n")]
+    #[structopt(name = "non-interactive", short = "n")]
     non_interactive: bool,
 
     /// Disable auto-refresh (reloading server data)
-    #[structopt(name = "disable-auto-refresh", short="S")]
+    #[structopt(name = "disable-auto-refresh", short = "S")]
     disable_auto_refresh: bool,
 
     #[structopt(subcommand)]
@@ -269,7 +268,10 @@ struct Job {
     pipeline: Pipeline,
 }
 
-use tui::{style::{Color, Style}, text::Span};
+use tui::{
+    style::{Color, Style},
+    text::Span,
+};
 
 impl Job {
     fn styled_status(&self) -> Span {
@@ -410,47 +412,46 @@ struct Thread {
 }
 
 impl Thread {
-    async fn get_jobs(pipeline_id: u64,
-        config: &Config, gitlab: &AsyncGitlab) ->
-        Result<BTreeMap<String, Job>, Error>
-    {
+    async fn get_jobs(
+        pipeline_id: u64,
+        config: &Config,
+        gitlab: &AsyncGitlab,
+    ) -> Result<BTreeMap<String, Job>, Error> {
         let mut next_pipeline_id = Some(pipeline_id);
         let mut jobs = vec![];
 
         while let Some(pipeline_id) = next_pipeline_id.take() {
-            let endpoint =
-                projects::pipelines::PipelineJobs::builder()
+            let endpoint = projects::pipelines::PipelineJobs::builder()
                 .project(config.project.clone())
                 .pipeline(pipeline_id)
-                .scopes(vec![
-                    JobScope::Pending,
-                    JobScope::Running,
-                    JobScope::Failed,
-                    JobScope::Success,
-                    JobScope::Canceled,
-                ].into_iter())
-                .build().map_err(Error::BuilderError)?;
-            let endpoint = gitlab::api::paged(endpoint,
-                gitlab::api::Pagination::Limit(300));
+                .scopes(
+                    vec![
+                        JobScope::Pending,
+                        JobScope::Running,
+                        JobScope::Failed,
+                        JobScope::Success,
+                        JobScope::Canceled,
+                    ]
+                    .into_iter(),
+                )
+                .build()
+                .map_err(Error::BuilderError)?;
+            let endpoint = gitlab::api::paged(endpoint, gitlab::api::Pagination::Limit(300));
             let jobs_query = endpoint.query_async(gitlab);
 
             let gitlab = gitlab.clone();
-            let endpoint =
-                bridges::PipelineBridges::builder()
+            let endpoint = bridges::PipelineBridges::builder()
                 .project(config.project.clone())
                 .pipeline(pipeline_id)
-                .build().map_err(Error::BuilderError)?;
-            let endpoint = gitlab::api::paged(endpoint,
-                gitlab::api::Pagination::Limit(3));
+                .build()
+                .map_err(Error::BuilderError)?;
+            let endpoint = gitlab::api::paged(endpoint, gitlab::api::Pagination::Limit(3));
             let bridges_query = endpoint.query_async(&gitlab);
 
-            let (jobs_result, bridges_result) =
-                futures::join!(jobs_query, bridges_query);
+            let (jobs_result, bridges_result) = futures::join!(jobs_query, bridges_query);
 
-            let added_jobs : Vec<Job> = jobs_result
-                .map_err(|x| Error::BoxError(Box::new(x)))?;
-            let bridges : Vec<Bridge> = bridges_result
-                .map_err(|x| Error::BoxError(Box::new(x)))?;
+            let added_jobs: Vec<Job> = jobs_result.map_err(|x| Error::BoxError(Box::new(x)))?;
+            let bridges: Vec<Bridge> = bridges_result.map_err(|x| Error::BoxError(Box::new(x)))?;
 
             jobs.extend(added_jobs);
             for bridge in bridges.into_iter() {
@@ -471,25 +472,27 @@ impl Thread {
 
     async fn run(&mut self) -> Result<(), Error> {
         loop {
-            let mut updates : usize = 0;
+            let mut updates: usize = 0;
             match &self.mode {
                 RunMode::None => {
                     return Ok(());
-                },
+                }
                 RunMode::Help => {
                     return Ok(());
-                },
-                RunMode::Jobs{..} => {}
-                RunMode::PipeDiff{..} => {},
+                }
+                RunMode::Jobs { .. } => {}
+                RunMode::PipeDiff { .. } => {}
                 RunMode::Pipelines(info) => {
                     if info.resolve_usernames {
                         if let Some(id) = self.pipeline_without_trigger.pop_back() {
                             let endpoint = projects::pipelines::Pipeline::builder()
                                 .project(self.config.project.clone())
                                 .pipeline(id)
-                                .build().map_err(Error::BuilderError)?;
-                            let pipeline : PipelineDetails =
-                                endpoint.query_async(&self.gitlab).await
+                                .build()
+                                .map_err(Error::BuilderError)?;
+                            let pipeline: PipelineDetails = endpoint
+                                .query_async(&self.gitlab)
+                                .await
                                 .map_err(|x| Error::BoxError(Box::new(x)))?;
                             let mut state = self.state.lock().await;
                             state.pipeline_trigger.insert(id, pipeline.user.username);
@@ -519,7 +522,7 @@ impl Thread {
                 }
             }
 
-            let mut updates : usize = 0;
+            let mut updates: usize = 0;
 
             if self.debug {
                 println!("glim: request iteration");
@@ -532,9 +535,12 @@ impl Thread {
                     let mut jobs = vec![];
 
                     if self.state.lock().await.jobs.update {
-                        jobs = Self::get_jobs(info.pipeline_id,
-                            &self.config, &self.gitlab).await?
-                            .values().into_iter().map(|x| x.clone()).collect();
+                        jobs = Self::get_jobs(info.pipeline_id, &self.config, &self.gitlab)
+                            .await?
+                            .values()
+                            .into_iter()
+                            .map(|x| x.clone())
+                            .collect();
                     }
 
                     let mut state = self.state.lock().await;
@@ -547,19 +553,16 @@ impl Thread {
                 }
                 RunMode::PipeDiff(pipediff) => {
                     if self.state.lock().await.pipediff.update {
-                        let from = Self::get_jobs(pipediff.from,
-                            &self.config, &self.gitlab);
+                        let from = Self::get_jobs(pipediff.from, &self.config, &self.gitlab);
                         let gitlab = self.gitlab.clone();
-                        let to = Self::get_jobs(pipediff.to,
-                            &self.config, &gitlab);
+                        let to = Self::get_jobs(pipediff.to, &self.config, &gitlab);
                         let (from, to) = futures::join!(from, to);
                         let from = from?;
                         let to = to?;
 
-                        let v : Vec<itertools::EitherOrBoth<(String, Job), (String, Job)>> =
-                            itertools::merge_join_by(from, to, |(k1, _), (k2, _)|
-                                Ord::cmp(k1, k2)
-                            ).collect();
+                        let v: Vec<itertools::EitherOrBoth<(String, Job), (String, Job)>> =
+                            itertools::merge_join_by(from, to, |(k1, _), (k2, _)| Ord::cmp(k1, k2))
+                                .collect();
 
                         let mut state = self.state.lock().await;
                         if state.pipediff.update {
@@ -569,7 +572,7 @@ impl Thread {
                             state.pipediff.updated();
                         }
                     }
-                },
+                }
                 RunMode::Pipelines(info) => {
                     if self.state.lock().await.pipelines.update {
                         let mut endpoint = projects::pipelines::Pipelines::builder();
@@ -582,10 +585,15 @@ impl Thread {
                             endpoint.ref_(r#ref.to_owned());
                         }
                         let endpoint = endpoint.build().map_err(Error::BuilderError)?;
-                        let endpoint = gitlab::api::paged(endpoint,
-                            gitlab::api::Pagination::Limit(info.nr_pipelines));
+                        let endpoint = gitlab::api::paged(
+                            endpoint,
+                            gitlab::api::Pagination::Limit(info.nr_pipelines),
+                        );
 
-                        let pipelines : Vec<Pipeline> = endpoint.query_async(&self.gitlab).await.map_err(|x| Error::BoxError(Box::new(x)))?;
+                        let pipelines: Vec<Pipeline> = endpoint
+                            .query_async(&self.gitlab)
+                            .await
+                            .map_err(|x| Error::BoxError(Box::new(x)))?;
 
                         if self.debug {
                             println!("glim: pipelines: {:?}", pipelines);
@@ -666,7 +674,9 @@ impl std::fmt::Display for Action {
             Action::OpenInBrowser => "Open job or pipeline in browser",
             Action::OpenPreviousInBrowser => "In pipediff, open previous job in browser",
             Action::GitLog => "Open git commit",
-            Action::ToggleUsernameResolve => "Toggle username load when listing other users pipelines",
+            Action::ToggleUsernameResolve => {
+                "Toggle username load when listing other users pipelines"
+            }
         };
         write!(f, "{}", s)?;
         Ok(())
@@ -698,10 +708,9 @@ struct Main {
     non_interactive: bool,
     auto_refresh: bool,
     first_load: bool,
-
 }
 impl Main {
-    fn get_remote_branch(config: &Config) -> Result<String, Error>  {
+    fn get_remote_branch(config: &Config) -> Result<String, Error> {
         let shell = std::env::var("SHELL")?;
         let mut command = std::process::Command::new(shell);
         command.stdout(std::process::Stdio::piped());
@@ -716,21 +725,18 @@ impl Main {
         let output = child.wait_with_output()?;
         let s = String::from_utf8_lossy(&output.stdout);
         Ok(s.trim().to_owned())
-
     }
 
     async fn command_mode_to_run_mode(
         client: &AsyncGitlab,
         mode: CommandMode,
-        config: &Config) -> Result<RunMode, Error>
-    {
+        config: &Config,
+    ) -> Result<RunMode, Error> {
         let alias = match mode {
             CommandMode::Pipelines(x) => return Ok(RunMode::Pipelines(x)),
             CommandMode::PipeDiff(x) => return Ok(RunMode::PipeDiff(x)),
             CommandMode::Jobs(x) => return Ok(RunMode::Jobs(x)),
-            CommandMode::FromAlias(alias) => {
-                alias
-            }
+            CommandMode::FromAlias(alias) => alias,
             CommandMode::FromReport(info) => {
                 match info {
                     ReportCommands::TwoPipelinesReports(info) => {
@@ -739,9 +745,12 @@ impl Main {
                         endpoint.order_by(PipelineOrderBy::Id);
                         endpoint.ref_(info.r#ref.to_owned());
                         let endpoint = endpoint.build().map_err(Error::BuilderError)?;
-                        let endpoint = gitlab::api::paged(endpoint, gitlab::api::Pagination::Limit(2));
-                        let pipelines : Vec<Pipeline> = endpoint.query_async(&
-                            *client).await.map_err(|x| Error::BoxError(Box::new(x)))?;
+                        let endpoint =
+                            gitlab::api::paged(endpoint, gitlab::api::Pagination::Limit(2));
+                        let pipelines: Vec<Pipeline> = endpoint
+                            .query_async(&*client)
+                            .await
+                            .map_err(|x| Error::BoxError(Box::new(x)))?;
                         if pipelines.len() < 2 {
                             return Err(Error::NotEnoughPipelines);
                         }
@@ -756,15 +765,22 @@ impl Main {
                         let from_jobs = from_jobs?;
                         let to_jobs = to_jobs?;
 
-                        use std::io::{Write, BufWriter};
                         use std::fs::OpenOptions;
+                        use std::io::{BufWriter, Write};
 
-                        let file = OpenOptions::new().create(true).write(true).truncate(true).open(info.out_path)?;
+                        let file = OpenOptions::new()
+                            .create(true)
+                            .write(true)
+                            .truncate(true)
+                            .open(info.out_path)?;
                         let mut file = BufWriter::new(file);
 
                         let two = TwoPipelines {
                             r#ref: info.r#ref.clone(),
-                            to: to.clone(), from: from.clone(), to_jobs, from_jobs
+                            to: to.clone(),
+                            from: from.clone(),
+                            to_jobs,
+                            from_jobs,
                         };
 
                         writeln!(&mut file, "{}", serde_json::ser::to_string(&two)?)?;
@@ -786,11 +802,12 @@ impl Main {
                     endpoint.order_by(PipelineOrderBy::Id);
                     endpoint.ref_(remote_ref.to_owned());
                     let endpoint = endpoint.build().map_err(Error::BuilderError)?;
-                    let endpoint = gitlab::api::paged(endpoint,
-                        gitlab::api::Pagination::Limit(1));
+                    let endpoint = gitlab::api::paged(endpoint, gitlab::api::Pagination::Limit(1));
 
-                    let mut pipelines : Vec<Pipeline> = endpoint.query_async(client)
-                        .await.map_err(|x| Error::BoxError(Box::new(x)))?;
+                    let mut pipelines: Vec<Pipeline> = endpoint
+                        .query_async(client)
+                        .await
+                        .map_err(|x| Error::BoxError(Box::new(x)))?;
 
                     if let Some(pipeline) = pipelines.pop() {
                         pipeline.id
@@ -799,9 +816,7 @@ impl Main {
                     }
                 };
 
-                return Ok(RunMode::Jobs(JobsMode {
-                    pipeline_id
-                }));
+                return Ok(RunMode::Jobs(JobsMode { pipeline_id }));
             }
             AliasCommands::Pipelines(info) => {
                 let nr_pipelines = 50;
@@ -821,7 +836,7 @@ impl Main {
                     }));
                 }
 
-                if !info.all_refs  {
+                if !info.all_refs {
                     if branch.len() > 0 {
                         return Ok(RunMode::Pipelines(PipelinesMode {
                             all_users: true,
@@ -872,8 +887,11 @@ impl Main {
         // Create the client.
         let client = builder.build_async().await?;
         let endpoint = users::CurrentUser::builder()
-            .build().map_err(Error::BuilderError)?;
-        let current_user: User = endpoint.query_async(&client).await
+            .build()
+            .map_err(Error::BuilderError)?;
+        let current_user: User = endpoint
+            .query_async(&client)
+            .await
             .map_err(|x| Error::BoxError(Box::new(x)))?;
 
         let state = Arc::new(Mutex::new(State::default()));
@@ -897,7 +915,9 @@ impl Main {
                 current_user,
                 debug,
                 mode: mode2,
-            }.run().await;
+            }
+            .run()
+            .await;
         });
 
         if let RunMode::None = mode {
@@ -955,25 +975,34 @@ impl Main {
         self.key_map.add_no_mods(KeyCode::F(1), Action::Help);
         self.key_map.add_no_mods(KeyCode::Up, Action::Up);
         self.key_map.add_no_mods(KeyCode::Down, Action::Down);
-        self.key_map.add_no_mods(KeyCode::Char('q'), Action::QuitOrGoBack);
+        self.key_map
+            .add_no_mods(KeyCode::Char('q'), Action::QuitOrGoBack);
         self.key_map.add_no_mods(KeyCode::Char('c'), Action::Clear);
         self.key_map.add_no_mods(KeyCode::Char('d'), Action::Diff);
-        self.key_map.add_no_mods(KeyCode::Char('r'), Action::RefreshToggle);
-        self.key_map.add_no_mods(KeyCode::Char('h'), Action::HideUnchanged);
+        self.key_map
+            .add_no_mods(KeyCode::Char('r'), Action::RefreshToggle);
+        self.key_map
+            .add_no_mods(KeyCode::Char('h'), Action::HideUnchanged);
         self.key_map.add_no_mods(KeyCode::PageUp, Action::PageUp);
-        self.key_map.add_no_mods(KeyCode::PageDown, Action::PageDown);
+        self.key_map
+            .add_no_mods(KeyCode::PageDown, Action::PageDown);
         self.key_map.add_no_mods(KeyCode::Home, Action::Home);
         self.key_map.add_no_mods(KeyCode::End, Action::End);
         self.key_map.add_no_mods(KeyCode::Delete, Action::Delete);
-        self.key_map.add_no_mods(KeyCode::Char('f'), Action::SetFromDiff);
-        self.key_map.add_no_mods(KeyCode::Char('t'), Action::SetToDiff);
+        self.key_map
+            .add_no_mods(KeyCode::Char('f'), Action::SetFromDiff);
+        self.key_map
+            .add_no_mods(KeyCode::Char('t'), Action::SetToDiff);
         self.key_map.add_no_mods(KeyCode::Backspace, Action::GoBack);
         self.key_map.add_no_mods(KeyCode::Esc, Action::GoBack);
         self.key_map.add_no_mods(KeyCode::Enter, Action::Enter);
-        self.key_map.add_no_mods(KeyCode::Char('o'), Action::OpenInBrowser);
-        self.key_map.add_no_mods(KeyCode::Char('p'), Action::OpenPreviousInBrowser);
+        self.key_map
+            .add_no_mods(KeyCode::Char('o'), Action::OpenInBrowser);
+        self.key_map
+            .add_no_mods(KeyCode::Char('p'), Action::OpenPreviousInBrowser);
         self.key_map.add_no_mods(KeyCode::Char('l'), Action::GitLog);
-        self.key_map.add_no_mods(KeyCode::Char('u'), Action::ToggleUsernameResolve);
+        self.key_map
+            .add_no_mods(KeyCode::Char('u'), Action::ToggleUsernameResolve);
         self.key_map.add_ctrl(KeyCode::Char('c'), Action::Quit);
 
         self.help = util::StatefulList::with_items({
@@ -982,12 +1011,11 @@ impl Main {
             s.lines().map(|x| x.to_owned()).collect()
         });
 
-
         let mut reader = EventStream::new();
         let mut rsp_recv = self.rsp_recv.take().unwrap();
 
         while !self.leave {
-            let updates : usize = if self.auto_refresh || self.first_load {
+            let updates: usize = if self.auto_refresh || self.first_load {
                 self.first_load = false;
                 let mut state = self.state.lock().await;
                 let mut updates = 0;
@@ -995,22 +1023,31 @@ impl Main {
                     RunMode::None => {
                         break;
                     }
-                    RunMode::Help => { }
-                    RunMode::Pipelines{..} => {
-                        if state.pipelines.check_expiry(std::time::Duration::from_millis(10000)) {
+                    RunMode::Help => {}
+                    RunMode::Pipelines { .. } => {
+                        if state
+                            .pipelines
+                            .check_expiry(std::time::Duration::from_millis(10000))
+                        {
                             updates += 1;
                         }
-                    },
-                    RunMode::Jobs{..} => {
-                        if state.jobs.check_expiry(std::time::Duration::from_millis(10000)) {
+                    }
+                    RunMode::Jobs { .. } => {
+                        if state
+                            .jobs
+                            .check_expiry(std::time::Duration::from_millis(10000))
+                        {
                             updates += 1;
                         }
-                    },
-                    RunMode::PipeDiff{..} => {
-                        if state.pipediff.check_expiry(std::time::Duration::from_millis(60000)) {
+                    }
+                    RunMode::PipeDiff { .. } => {
+                        if state
+                            .pipediff
+                            .check_expiry(std::time::Duration::from_millis(60000))
+                        {
                             updates += 1;
                         }
-                    },
+                    }
                 }
                 updates
             } else {
@@ -1058,20 +1095,23 @@ impl Main {
 
     async fn draw(&mut self) -> Result<(), Error> {
         match &self.mode {
-            RunMode::None => { Ok(()) }
+            RunMode::None => Ok(()),
             RunMode::PipeDiff(info) => {
                 let info = info.clone();
                 self.draw_pipediff(info).await
             }
-            RunMode::Pipelines(info) => { let info = info.clone(); self.draw_pipelines(info).await },
+            RunMode::Pipelines(info) => {
+                let info = info.clone();
+                self.draw_pipelines(info).await
+            }
             RunMode::Help => self.draw_help().await,
-            RunMode::Jobs{..} => self.draw_jobs().await,
+            RunMode::Jobs { .. } => self.draw_jobs().await,
         }
     }
 
     async fn check_report_non_interactive(&mut self) -> Result<bool, Error> {
         match &self.mode {
-            RunMode::PipeDiff{..} => {
+            RunMode::PipeDiff { .. } => {
                 return self.non_interactive_pipediff().await;
             }
             _ => {}
@@ -1088,7 +1128,7 @@ impl Main {
                 match res {
                     itertools::EitherOrBoth::Both((k, a), (_, b)) => {
                         if a.status != b.status {
-                            println!("{:width$}: {} -> {}", k, a.status, b.status, width=40);
+                            println!("{:width$}: {} -> {}", k, a.status, b.status, width = 40);
                         }
                     }
                     _ => {}
@@ -1118,18 +1158,16 @@ impl Main {
     fn divide_for_status_line(rect: tui::layout::Rect) -> Vec<tui::layout::Rect> {
         Layout::default()
             .direction(Direction::Vertical)
-            .constraints( [
-                Constraint::Min(0),
-                Constraint::Max(1),
-            ].as_ref()
-            ).split(rect)
+            .constraints([Constraint::Min(0), Constraint::Max(1)].as_ref())
+            .split(rect)
     }
 
     async fn draw_pipelines(&mut self, info: PipelinesMode) -> Result<(), Error> {
         let state = self.state.lock().await;
 
-        state.pipelines.fix_selected(&mut self.selected_pipeline,
-            Some(self.pipelines.len()));
+        state
+            .pipelines
+            .fix_selected(&mut self.selected_pipeline, Some(self.pipelines.len()));
         let selected_pipeline = &mut self.selected_pipeline;
         let pipeline_ids = &mut self.pipelines;
         let ignored_pipeline_ids = &self.ignored_pipeline_ids;
@@ -1139,9 +1177,7 @@ impl Main {
         self.terminal.as_mut().unwrap().draw(|rect| {
             let mut items: Vec<_> = vec![];
             pipeline_ids.clear();
-            let mut widths = vec![
-                Constraint::Length(8),
-            ];
+            let mut widths = vec![Constraint::Length(8)];
             if info.resolve_usernames {
                 widths.push(Constraint::Length(15));
             };
@@ -1181,9 +1217,7 @@ impl Main {
                         }),
                     );
 
-                    let mut v = vec![
-                        Cell::from(Span::raw(pipeline.id.to_string())),
-                    ];
+                    let mut v = vec![Cell::from(Span::raw(pipeline.id.to_string()))];
 
                     if info.resolve_usernames {
                         v.push(Cell::from(Span::raw(user)));
@@ -1216,59 +1250,59 @@ impl Main {
             }
 
             let pipelines = Table::new(items)
-            .header(Row::new({
-                let mut v = vec![
-                    Cell::from(Span::styled(
-                            "ID",
-                            Style::default().add_modifier(Modifier::BOLD),
-                    ))
-                ];
+                .header(Row::new({
+                    let mut v = vec![Cell::from(Span::styled(
+                        "ID",
+                        Style::default().add_modifier(Modifier::BOLD),
+                    ))];
 
-                if info.resolve_usernames {
-                    v.push(Cell::from(Span::styled(
+                    if info.resolve_usernames {
+                        v.push(Cell::from(Span::styled(
                             "User",
                             Style::default().add_modifier(Modifier::BOLD),
-                    )));
-                }
+                        )));
+                    }
 
-                if pipelines_select_for_diff.is_some() {
-                    v.push(Cell::from(Span::styled(
+                    if pipelines_select_for_diff.is_some() {
+                        v.push(Cell::from(Span::styled(
                             "Diff",
                             Style::default().add_modifier(Modifier::BOLD),
-                    )));
-                }
+                        )));
+                    }
 
-                v.extend([
-                    Cell::from(Span::styled(
-                            "Status",
-                            Style::default().add_modifier(Modifier::BOLD),
-                    )),
-                    Cell::from(Span::styled(
-                            "Ref",
-                            Style::default().add_modifier(Modifier::BOLD),
-                    )),
-                    Cell::from(Span::styled(
-                            "GitHash",
-                            Style::default().add_modifier(Modifier::BOLD),
-                    )),
-                    Cell::from(Span::styled(
-                            "Created at",
-                            Style::default().add_modifier(Modifier::BOLD),
-                    )),
-                ].iter().cloned());
-                v
-            }))
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .style(Style::default().fg(Color::White))
-                    .title("Pipelines")
-                    .border_type(BorderType::Plain),
-            )
-            .highlight_style(
-                Style::default().bg(Color::Rgb(60, 60, 80))
-            )
-            .widths(&widths);
+                    v.extend(
+                        [
+                            Cell::from(Span::styled(
+                                "Status",
+                                Style::default().add_modifier(Modifier::BOLD),
+                            )),
+                            Cell::from(Span::styled(
+                                "Ref",
+                                Style::default().add_modifier(Modifier::BOLD),
+                            )),
+                            Cell::from(Span::styled(
+                                "GitHash",
+                                Style::default().add_modifier(Modifier::BOLD),
+                            )),
+                            Cell::from(Span::styled(
+                                "Created at",
+                                Style::default().add_modifier(Modifier::BOLD),
+                            )),
+                        ]
+                        .iter()
+                        .cloned(),
+                    );
+                    v
+                }))
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .style(Style::default().fg(Color::White))
+                        .title("Pipelines")
+                        .border_type(BorderType::Plain),
+                )
+                .highlight_style(Style::default().bg(Color::Rgb(60, 60, 80)))
+                .widths(&widths);
 
             let chunks = Self::divide_for_status_line(rect.size());
             rect.render_stateful_widget(pipelines, chunks[0], selected_pipeline);
@@ -1304,40 +1338,38 @@ impl Main {
             }
 
             let jobs = Table::new(items)
-            .header(Row::new(vec![
-                Cell::from(Span::styled(
-                    "ID",
-                    Style::default().add_modifier(Modifier::BOLD),
-                )),
-                Cell::from(Span::styled(
-                    "Pipeline",
-                    Style::default().add_modifier(Modifier::BOLD),
-                )),
-                Cell::from(Span::styled(
-                    "Status",
-                    Style::default().add_modifier(Modifier::BOLD),
-                )),
-                Cell::from(Span::styled(
-                    "Name",
-                    Style::default().add_modifier(Modifier::BOLD),
-                )),
-            ]))
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .style(Style::default().fg(Color::White))
-                    .title("Jobs")
-                    .border_type(BorderType::Plain),
-            )
-            .highlight_style(
-                Style::default().bg(Color::Rgb(60, 60, 80))
-            )
-            .widths(&[
-                Constraint::Length(9),
-                Constraint::Length(9),
-                Constraint::Length(10),
-                Constraint::Length(40),
-            ]);
+                .header(Row::new(vec![
+                    Cell::from(Span::styled(
+                        "ID",
+                        Style::default().add_modifier(Modifier::BOLD),
+                    )),
+                    Cell::from(Span::styled(
+                        "Pipeline",
+                        Style::default().add_modifier(Modifier::BOLD),
+                    )),
+                    Cell::from(Span::styled(
+                        "Status",
+                        Style::default().add_modifier(Modifier::BOLD),
+                    )),
+                    Cell::from(Span::styled(
+                        "Name",
+                        Style::default().add_modifier(Modifier::BOLD),
+                    )),
+                ]))
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .style(Style::default().fg(Color::White))
+                        .title("Jobs")
+                        .border_type(BorderType::Plain),
+                )
+                .highlight_style(Style::default().bg(Color::Rgb(60, 60, 80)))
+                .widths(&[
+                    Constraint::Length(9),
+                    Constraint::Length(9),
+                    Constraint::Length(10),
+                    Constraint::Length(40),
+                ]);
 
             let chunks = Self::divide_for_status_line(rect.size());
             rect.render_stateful_widget(jobs, chunks[0], selected_job);
@@ -1351,10 +1383,12 @@ impl Main {
         let help = &mut self.help;
 
         self.terminal.as_mut().unwrap().draw(|rect| {
-            let items: Vec<_> =
-                help.items.iter().map(|x| ListItem::new(x.clone())).collect();
-            let help_list = List::new(items)
-            .block(
+            let items: Vec<_> = help
+                .items
+                .iter()
+                .map(|x| ListItem::new(x.clone()))
+                .collect();
+            let help_list = List::new(items).block(
                 Block::default()
                     .borders(Borders::ALL)
                     .style(Style::default().fg(Color::White))
@@ -1392,11 +1426,11 @@ impl Main {
 
                             printed_pipediffs.push((*pipediff).clone());
                             items.push(Row::new(vec![
-                                    Cell::from(Span::raw(k.to_string())),
-                                    Cell::from(Span::raw(a.id.to_string())),
-                                    Cell::from(Span::raw(b.id.to_string())),
-                                    Cell::from(a.styled_status()),
-                                    Cell::from(b.styled_status()),
+                                Cell::from(Span::raw(k.to_string())),
+                                Cell::from(Span::raw(a.id.to_string())),
+                                Cell::from(Span::raw(b.id.to_string())),
+                                Cell::from(a.styled_status()),
+                                Cell::from(b.styled_status()),
                             ]));
                         }
                         _ => {}
@@ -1405,45 +1439,43 @@ impl Main {
             }
 
             let pipediffs = Table::new(items)
-            .header(Row::new(vec![
-                Cell::from(Span::styled(
-                    "Name",
-                    Style::default().add_modifier(Modifier::BOLD),
-                )),
-                Cell::from(Span::styled(
-                    "Old ID",
-                    Style::default().add_modifier(Modifier::BOLD),
-                )),
-                Cell::from(Span::styled(
-                    "New ID",
-                    Style::default().add_modifier(Modifier::BOLD),
-                )),
-                Cell::from(Span::styled(
-                    "Old Status",
-                    Style::default().add_modifier(Modifier::BOLD),
-                )),
-                Cell::from(Span::styled(
-                    "New Status",
-                    Style::default().add_modifier(Modifier::BOLD),
-                )),
-            ]))
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .style(Style::default().fg(Color::White))
-                    .title(format!("Jobs: Pipe diff {} -> {}", info.from, info.to))
-                    .border_type(BorderType::Plain),
-            )
-            .highlight_style(
-                Style::default().bg(Color::Rgb(60, 60, 80))
-            )
-            .widths(&[
-                Constraint::Length(40),
-                Constraint::Length(12),
-                Constraint::Length(12),
-                Constraint::Length(10),
-                Constraint::Length(10),
-            ]);
+                .header(Row::new(vec![
+                    Cell::from(Span::styled(
+                        "Name",
+                        Style::default().add_modifier(Modifier::BOLD),
+                    )),
+                    Cell::from(Span::styled(
+                        "Old ID",
+                        Style::default().add_modifier(Modifier::BOLD),
+                    )),
+                    Cell::from(Span::styled(
+                        "New ID",
+                        Style::default().add_modifier(Modifier::BOLD),
+                    )),
+                    Cell::from(Span::styled(
+                        "Old Status",
+                        Style::default().add_modifier(Modifier::BOLD),
+                    )),
+                    Cell::from(Span::styled(
+                        "New Status",
+                        Style::default().add_modifier(Modifier::BOLD),
+                    )),
+                ]))
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .style(Style::default().fg(Color::White))
+                        .title(format!("Jobs: Pipe diff {} -> {}", info.from, info.to))
+                        .border_type(BorderType::Plain),
+                )
+                .highlight_style(Style::default().bg(Color::Rgb(60, 60, 80)))
+                .widths(&[
+                    Constraint::Length(40),
+                    Constraint::Length(12),
+                    Constraint::Length(12),
+                    Constraint::Length(10),
+                    Constraint::Length(10),
+                ]);
 
             let chunks = Self::divide_for_status_line(rect.size());
             rect.render_stateful_widget(pipediffs, chunks[0], selected_pipediff);
@@ -1458,10 +1490,10 @@ impl Main {
 
         match self.mode {
             RunMode::Help => self.help.previous(),
-            RunMode::None => { }
+            RunMode::None => {}
             RunMode::Jobs(_) => state.jobs.up(&mut self.selected_job, None),
             RunMode::Pipelines(_) => state.pipelines.up(&mut self.selected_pipeline, None),
-            RunMode::PipeDiff{..} => state.pipediff.up(&mut self.selected_pipediff, None),
+            RunMode::PipeDiff { .. } => state.pipediff.up(&mut self.selected_pipediff, None),
         }
 
         Ok(())
@@ -1471,11 +1503,17 @@ impl Main {
         let state = self.state.lock().await;
 
         match self.mode {
-            RunMode::None => { }
+            RunMode::None => {}
             RunMode::Help => self.help.next(),
-            RunMode::Jobs(_) => state.jobs.down(&mut self.selected_job, Some(self.jobs.len())),
-            RunMode::Pipelines(_) => state.pipelines.down(&mut self.selected_pipeline, Some(self.pipelines.len())),
-            RunMode::PipeDiff{..} => state.pipediff.down(&mut self.selected_pipediff, Some(self.pipediffs.len())),
+            RunMode::Jobs(_) => state
+                .jobs
+                .down(&mut self.selected_job, Some(self.jobs.len())),
+            RunMode::Pipelines(_) => state
+                .pipelines
+                .down(&mut self.selected_pipeline, Some(self.pipelines.len())),
+            RunMode::PipeDiff { .. } => state
+                .pipediff
+                .down(&mut self.selected_pipediff, Some(self.pipediffs.len())),
         }
 
         Ok(())
@@ -1489,7 +1527,7 @@ impl Main {
             RunMode::Help => {}
             RunMode::Jobs(_) => state.jobs.home(&mut self.selected_job, None),
             RunMode::Pipelines(_) => state.pipelines.home(&mut self.selected_pipeline, None),
-            RunMode::PipeDiff{..} => state.pipediff.home(&mut self.selected_pipediff, None),
+            RunMode::PipeDiff { .. } => state.pipediff.home(&mut self.selected_pipediff, None),
         }
 
         Ok(())
@@ -1501,9 +1539,15 @@ impl Main {
         match self.mode {
             RunMode::Help => {}
             RunMode::None => {}
-            RunMode::Jobs(_) => state.jobs.end(&mut self.selected_job, Some(self.jobs.len())),
-            RunMode::Pipelines(_) => state.pipelines.end(&mut self.selected_pipeline, Some(self.pipelines.len())),
-            RunMode::PipeDiff{..} => state.pipediff.end(&mut self.selected_pipediff, Some(self.pipediffs.len())),
+            RunMode::Jobs(_) => state
+                .jobs
+                .end(&mut self.selected_job, Some(self.jobs.len())),
+            RunMode::Pipelines(_) => state
+                .pipelines
+                .end(&mut self.selected_pipeline, Some(self.pipelines.len())),
+            RunMode::PipeDiff { .. } => state
+                .pipediff
+                .end(&mut self.selected_pipediff, Some(self.pipediffs.len())),
         }
 
         Ok(())
@@ -1544,8 +1588,8 @@ impl Main {
     fn on_enter_job(&self, job: &Job, pipeline_id: u64) -> Result<(), Error> {
         if let Some(open_job_command) = &self.config.hooks.open_job_command {
             let shell = std::env::var("SHELL")?;
-            let mut command =
-                std::process::Command::new(shell); command.arg("-c");
+            let mut command = std::process::Command::new(shell);
+            command.arg("-c");
             command.arg(open_job_command);
             command.env("GLCIM_JOB_ID", format!("{}", job.id));
             command.env("GLCIM_JOB_NAME", format!("{}", job.name));
@@ -1566,7 +1610,7 @@ impl Main {
 
     async fn on_enter(&mut self) -> Result<(), Error> {
         match self.mode {
-            RunMode::None => { }
+            RunMode::None => {}
             RunMode::Help => {}
             RunMode::Jobs(ref info) => {
                 if let Some(selected) = self.selected_job.selected() {
@@ -1587,11 +1631,15 @@ impl Main {
                         }
                     }
                 }
-            },
+            }
             RunMode::Pipelines(_) => {
                 if let Some((Some(from), Some(to))) = &self.pipelines_select_for_diff {
-                    self.prev_mode = Some(std::mem::replace(&mut self.mode,
-                        RunMode::PipeDiff(PipeDiff { from: *from, to: *to })
+                    self.prev_mode = Some(std::mem::replace(
+                        &mut self.mode,
+                        RunMode::PipeDiff(PipeDiff {
+                            from: *from,
+                            to: *to,
+                        }),
                     ));
                     self.selected_pipediff.select(None);
                     self.first_load = true;
@@ -1606,10 +1654,11 @@ impl Main {
                     if selected < self.pipelines.len() {
                         let pipeline = &self.pipelines[selected];
                         self.selected_job.select(None);
-                        self.prev_mode = Some(std::mem::replace(&mut self.mode,
+                        self.prev_mode = Some(std::mem::replace(
+                            &mut self.mode,
                             RunMode::Jobs(JobsMode {
-                                pipeline_id: pipeline.id
-                            })
+                                pipeline_id: pipeline.id,
+                            }),
                         ));
                         self.first_load = true;
                         let mut state = self.state.lock().await;
@@ -1624,13 +1673,19 @@ impl Main {
     }
 
     fn on_job_open_in_browser(&self, job_id: u64) -> Result<(), Error> {
-        let url = format!("https://{}/{}/-/jobs/{}", &self.config.hostname, &self.config.project, job_id);
+        let url = format!(
+            "https://{}/{}/-/jobs/{}",
+            &self.config.hostname, &self.config.project, job_id
+        );
         let _ = webbrowser::open(&url);
         Ok(())
     }
 
     fn on_pipeline_open_in_browser(&self, pipeline_id: u64) -> Result<(), Error> {
-        let url = format!("https://{}/{}/pipelines/{}", &self.config.hostname, &self.config.project, pipeline_id);
+        let url = format!(
+            "https://{}/{}/pipelines/{}",
+            &self.config.hostname, &self.config.project, pipeline_id
+        );
         let _ = webbrowser::open(&url);
         Ok(())
     }
@@ -1658,7 +1713,7 @@ impl Main {
                         }
                     }
                 }
-            },
+            }
             RunMode::Pipelines(_) => {
                 if let Some(selected) = self.selected_pipeline.selected() {
                     if selected < self.pipelines.len() {
@@ -1677,7 +1732,7 @@ impl Main {
             RunMode::None => {}
             RunMode::Help => {}
             RunMode::Jobs(_) => {}
-            RunMode::PipeDiff(_) => {},
+            RunMode::PipeDiff(_) => {}
             RunMode::Pipelines(info) => {
                 info.resolve_usernames = !info.resolve_usernames;
                 let _ = self.tx_cmd.try_send(RxCmd::UpdateMode(self.mode.clone()));
@@ -1703,7 +1758,7 @@ impl Main {
                         }
                     }
                 }
-            },
+            }
             RunMode::Pipelines(_) => {}
         }
 
@@ -1712,10 +1767,10 @@ impl Main {
 
     fn ignore_pipeline(&mut self) -> Result<(), Error> {
         match self.mode {
-            RunMode::None => { }
+            RunMode::None => {}
             RunMode::Help => {}
-            RunMode::Jobs(_) => { }
-            RunMode::PipeDiff{..} => { },
+            RunMode::Jobs(_) => {}
+            RunMode::PipeDiff { .. } => {}
             RunMode::Pipelines(_) => {
                 if let Some(selected) = self.selected_pipeline.selected() {
                     if selected < self.pipelines.len() {
@@ -1734,10 +1789,10 @@ impl Main {
 
     fn open_git_log(&mut self) -> Result<(), Error> {
         match self.mode {
-            RunMode::None => { }
+            RunMode::None => {}
             RunMode::Help => {}
-            RunMode::Jobs(_) => { }
-            RunMode::PipeDiff{..} => { },
+            RunMode::Jobs(_) => {}
+            RunMode::PipeDiff { .. } => {}
             RunMode::Pipelines(_) => {
                 if let Some(local_repo) = &self.config.local_repo {
                     if let Some(selected) = self.selected_pipeline.selected() {
@@ -1773,7 +1828,9 @@ impl Main {
                 };
 
                 match action {
-                    Action::Help => self.prev_mode = Some(std::mem::replace(&mut self.mode, RunMode::Help)),
+                    Action::Help => {
+                        self.prev_mode = Some(std::mem::replace(&mut self.mode, RunMode::Help))
+                    }
                     Action::Quit => self.leave = true,
                     Action::QuitOrGoBack => {
                         if self.prev_mode.is_some() {
@@ -1781,7 +1838,7 @@ impl Main {
                         } else {
                             self.leave = true;
                         }
-                    },
+                    }
                     Action::Clear => self.ignored_pipeline_ids.clear(),
                     Action::Diff => {
                         if self.pipelines_select_for_diff.is_some() {
@@ -1790,26 +1847,26 @@ impl Main {
                             if self.pipelines.len() >= 2 {
                                 let from = &self.pipelines[0];
                                 let to = &self.pipelines[1];
-                                self.pipelines_select_for_diff = Some((
-                                        Some(to.id), Some(from.id)
-                                ))
+                                self.pipelines_select_for_diff = Some((Some(to.id), Some(from.id)))
                             }
                         }
-                    },
+                    }
                     Action::RefreshToggle => self.auto_refresh = !self.auto_refresh,
-                    Action::HideUnchanged => self.pipediff_hide_unchanged = !self.pipediff_hide_unchanged,
+                    Action::HideUnchanged => {
+                        self.pipediff_hide_unchanged = !self.pipediff_hide_unchanged
+                    }
                     Action::Up => self.on_up().await?,
                     Action::Down => self.on_down().await?,
                     Action::PageUp => {
                         for _ in 0..crossterm::terminal::size()?.1.saturating_sub(2) {
                             self.on_up().await?;
                         }
-                    },
+                    }
                     Action::PageDown => {
                         for _ in 0..crossterm::terminal::size()?.1.saturating_sub(2) {
                             self.on_down().await?;
                         }
-                    },
+                    }
                     Action::Home => self.goto_top_of_list().await?,
                     Action::End => self.goto_end_of_list().await?,
                     Action::Delete => self.ignore_pipeline()?,
@@ -1823,7 +1880,7 @@ impl Main {
                     Action::ToggleUsernameResolve => self.toggle_username_resolve()?,
                 }
             }
-            _ => {},
+            _ => {}
         }
 
         Ok(())
@@ -1856,13 +1913,11 @@ fn main_wrap() -> Result<(), Error> {
         .build()?
         .block_on(async {
             match Main::new(&opt).await {
-                Err(err) => {
-                    Err(err)
-                }
+                Err(err) => Err(err),
                 Ok(mut glim) => {
                     let v = glim.run().await;
                     Ok((glim, v))
-                },
+                }
             }
         })?;
 
@@ -1876,7 +1931,7 @@ fn main_wrap() -> Result<(), Error> {
 
 fn main() {
     match main_wrap() {
-        Ok(()) => {},
+        Ok(()) => {}
         Err(e) => {
             eprintln!("{}", e);
             std::process::exit(-1);

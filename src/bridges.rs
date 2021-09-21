@@ -32,11 +32,15 @@ impl<'a> Endpoint for PipelineBridges<'a> {
     }
 
     fn endpoint(&self) -> Cow<'static, str> {
-        format!("projects/{}/pipelines/{}/bridges", self.project, self.pipeline).into()
+        format!(
+            "projects/{}/pipelines/{}/bridges",
+            self.project, self.pipeline
+        )
+        .into()
     }
 
     fn parameters(&self) -> QueryParams {
-        let  params = QueryParams::default();
+        let params = QueryParams::default();
         params
     }
 }

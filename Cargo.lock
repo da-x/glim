@@ -63,6 +63,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eab1c04a571841102f5345a8fc0f6bb3d31c315dec879b5c6e42e40ce7ffa34e"
 
 [[package]]
+name = "async-recursion"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "394b41acee32ce53306b9abfa8ad4df10b73b3c003e5c5da4720cca722010878"
+dependencies = [
+ "proc-macro2 1.0.24",
+ "quote 1.0.9",
+ "syn 1.0.61",
+]
+
+[[package]]
 name = "async-trait"
 version = "0.1.50"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -599,7 +610,7 @@ dependencies = [
  "futures-util",
  "graphql_client",
  "http",
- "itertools 0.10.0",
+ "itertools",
  "log",
  "percent-encoding",
  "reqwest",
@@ -614,6 +625,7 @@ dependencies = [
 name = "glim"
 version = "0.2.0"
 dependencies = [
+ "async-recursion",
  "chrono",
  "config",
  "crossterm 0.19.0",
@@ -622,7 +634,7 @@ dependencies = [
  "futures",
  "futures-timer",
  "gitlab",
- "itertools 0.8.2",
+ "itertools",
  "masof",
  "serde 1.0.123",
  "serde_json",
@@ -843,15 +855,6 @@ checksum = "47be2f14c678be2fdcab04ab1171db51b2762ce6f0a8ee87c8dd4a04ed216135"
 
 [[package]]
 name = "itertools"
-version = "0.8.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f56a2d0bc861f9165be4eb3442afd3c236d8a98afd426f65d92324ae1091a484"
-dependencies = [
- "either",
-]
-
-[[package]]
-name = "itertools"
 version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "37d572918e350e82412fe766d24b15e6682fb2ed2bbe018280caa810397cb319"
@@ -936,7 +939,7 @@ dependencies = [
 [[package]]
 name = "masof"
 version = "0.1.1"
-source = "git+https://github.com/da-x/masof?rev=v0.1.1#c4c6024b9089541fd125480f0d183d5b0f4d1b2e"
+source = "git+https://github.com/da-x/masof?rev=v0.1.2#c40802080bfa06465e89d054f29e266f1dfc74d6"
 dependencies = [
  "ansi_term 0.12.1",
  "crossterm 0.19.0",

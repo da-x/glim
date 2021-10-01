@@ -105,8 +105,15 @@ enum RunMode {
     Pipelines(PipelinesMode),
     PipeDiff(PipeDiff),
     Jobs(JobsMode),
+    Modal(Request, Box<RunMode>),
     Help,
     None,
+}
+
+#[derive(Debug, Clone)]
+enum Request {
+    DeletePipeline(u64),
+    CancelPipeline(u64),
 }
 
 #[derive(Debug, StructOpt, Clone)]
@@ -393,12 +400,15 @@ impl<T> Updatable<Vec<T>> {
 
 type JobDiff = itertools::EitherOrBoth<(String, Job), (String, Job)>;
 
+
 #[derive(Default)]
 struct State {
     request_count: u64,
     pipelines: Updatable<Vec<Pipeline>>,
     jobs: Updatable<Vec<Job>>,
     pipediff: Updatable<Vec<JobDiff>>,
+    request_queue: VecDeque<Request>,
+    response: Option<(Instant, String)>,
     pipeline_trigger: std::collections::HashMap<u64, String>,
 }
 
@@ -488,6 +498,7 @@ impl Thread {
                 RunMode::Help => {
                     return Ok(());
                 }
+                RunMode::Modal{..} => {}
                 RunMode::Jobs { .. } => {}
                 RunMode::PipeDiff { .. } => {}
                 RunMode::Pipelines(info) => {
@@ -539,6 +550,7 @@ impl Thread {
             match &self.mode {
                 RunMode::None => {}
                 RunMode::Help => {}
+                RunMode::Modal{..} => {}
                 RunMode::Jobs(info) => {
                     let mut jobs = vec![];
 
@@ -625,6 +637,53 @@ impl Thread {
                 }
             }
 
+            let request_queue = {
+                let mut state = self.state.lock().await;
+                let v: Vec<_> = state.request_queue.drain(..).collect();
+                v
+            };
+
+            for request in request_queue.into_iter() {
+                let (rsp, msg) = match request {
+                    Request::DeletePipeline(pipeline_id) => {
+                        let endpoint = projects::pipelines::DeletePipeline::builder()
+                            .project(self.config.project.clone())
+                            .pipeline(pipeline_id)
+                            .build()
+                            .map_err(Error::BuilderError)?;
+                        let rsp : Result<_, _> = gitlab::api::raw(endpoint)
+                            .query_async(&self.gitlab)
+                            .await;
+                        let mut state = self.state.lock().await;
+                        state.pipelines.update = true;
+                        state.jobs.update = true;
+                        (rsp, "Pipeline deletion")
+                    }
+                    Request::CancelPipeline(pipeline_id) => {
+                        let endpoint = projects::pipelines::CancelPipeline::builder()
+                            .project(self.config.project.clone())
+                            .pipeline(pipeline_id)
+                            .build()
+                            .map_err(Error::BuilderError)?;
+                        let rsp : Result<_, _> = gitlab::api::raw(endpoint)
+                            .query_async(&self.gitlab)
+                            .await;
+                        let mut state = self.state.lock().await;
+                        state.pipelines.update = true;
+                        state.jobs.update = true;
+                        (rsp, "Pipeline cancellation")
+                    }
+                };
+
+                let mut state = self.state.lock().await;
+                let msg = match rsp {
+                    Ok(_) => format!("{}: success", msg),
+                    Err(err) => format!("{}: error - {}", msg, err),
+                };
+                state.response = Some((std::time::Instant::now(), msg));
+                updates += 1;
+            }
+
             if updates > 0 {
                 let _ = self.rsp_sender.try_send(());
             }
@@ -656,6 +715,9 @@ enum Action {
     OpenPreviousInBrowser,
     GitLog,
     ToggleUsernameResolve,
+    DeletePipeline,
+    CancelPipeline,
+    ConfirmAction,
 }
 
 impl std::fmt::Display for Action {
@@ -685,6 +747,15 @@ impl std::fmt::Display for Action {
             Action::ToggleUsernameResolve => {
                 "Toggle username load when listing other users pipelines"
             }
+            Action::DeletePipeline => {
+                "Delete the current pipeline"
+            }
+            Action::CancelPipeline => {
+                "Cancel the current pipeline"
+            }
+            Action::ConfirmAction => {
+                "When presented request for confirmation, confirm action"
+            }
         };
         write!(f, "{}", s)?;
         Ok(())
@@ -710,6 +781,7 @@ struct Main {
     config: Config,
     opt: CommandArgs,
     debug: bool,
+    modal: Option<Request>,
     leave: bool,
     pipediff_hide_unchanged: bool,
     pipelines_select_for_diff: Option<(Option<u64>, Option<u64>)>,
@@ -939,6 +1011,7 @@ impl Main {
             tx_cmd: tx,
             config,
             debug: opt.debug,
+            modal: None,
             pipediff_hide_unchanged: true,
             pipelines_select_for_diff: None,
             auto_refresh: !opt.disable_auto_refresh,
@@ -965,6 +1038,8 @@ impl Main {
         self.key_map.add_no_mods(KeyCode::Down, Action::Down);
         self.key_map
             .add_no_mods(KeyCode::Char('q'), Action::QuitOrGoBack);
+        self.key_map
+            .add_no_mods(KeyCode::Char('n'), Action::QuitOrGoBack);
         self.key_map.add_no_mods(KeyCode::Char('c'), Action::Clear);
         self.key_map.add_no_mods(KeyCode::Char('d'), Action::Diff);
         self.key_map
@@ -991,7 +1066,11 @@ impl Main {
         self.key_map.add_no_mods(KeyCode::Char('l'), Action::GitLog);
         self.key_map
             .add_no_mods(KeyCode::Char('u'), Action::ToggleUsernameResolve);
+        self.key_map
+            .add_no_mods(KeyCode::Char('y'), Action::ConfirmAction);
         self.key_map.add_ctrl(KeyCode::Char('c'), Action::Quit);
+        self.key_map.add_ctrl(KeyCode::Char('x'), Action::DeletePipeline);
+        self.key_map.add_shift(KeyCode::Char('C'), Action::CancelPipeline);
 
         self.help = util::StatefulList::with_items({
             let mut s = String::new();
@@ -1012,6 +1091,7 @@ impl Main {
                         break;
                     }
                     RunMode::Help => {}
+                    RunMode::Modal{..} => {}
                     RunMode::Pipelines { .. } => {
                         if state
                             .pipelines
@@ -1035,6 +1115,12 @@ impl Main {
                         {
                             updates += 1;
                         }
+                    }
+                }
+                if let Some((instant, _)) = &state.response {
+                    if instant.elapsed() > std::time::Duration::from_secs(5) {
+                        state.response = None;
+                        updates += 1;
                     }
                 }
                 updates
@@ -1081,15 +1167,22 @@ impl Main {
         Ok(())
     }
 
+    #[async_recursion::async_recursion]
     async fn draw(&mut self) -> Result<(), Error> {
-        match &self.mode {
+        match self.mode.clone() {
+            RunMode::Modal(info, submode) => {
+                let prev = std::mem::replace(&mut self.mode, *submode);
+                self.modal = Some(info);
+                let ret = self.draw().await;
+                self.modal = None;
+                self.mode = prev;
+                ret
+            }
             RunMode::None => Ok(()),
             RunMode::PipeDiff(info) => {
-                let info = info.clone();
                 self.draw_pipediff(info).await
             }
             RunMode::Pipelines(info) => {
-                let info = info.clone();
                 self.draw_pipelines(info).await
             }
             RunMode::Help => self.draw_help().await,
@@ -1128,7 +1221,7 @@ impl Main {
         Ok(false)
     }
 
-    fn status_line(auto_refresh: bool) -> Sparkline<'static> {
+    fn status_line(state: &State, auto_refresh: bool) -> Sparkline<'static> {
         Sparkline::default()
             .block(Block::default().title({
                 let mut s = String::new();
@@ -1137,6 +1230,11 @@ impl Main {
                 } else {
                     s += "F1 for help | Auto-refresh: disabled";
                 }
+
+                if let Some((_, response)) = &state.response {
+                    s += &format!("| {}", response);
+                }
+
                 s
             }))
             .data(&[0])
@@ -1146,7 +1244,7 @@ impl Main {
     fn divide_for_status_line(rect: tui::layout::Rect) -> Vec<tui::layout::Rect> {
         Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Min(0), Constraint::Max(1)].as_ref())
+            .constraints([Constraint::Min(1), Constraint::Length(1)].as_ref())
             .split(rect)
     }
 
@@ -1159,8 +1257,9 @@ impl Main {
         let selected_pipeline = &mut self.selected_pipeline;
         let pipeline_ids = &mut self.pipelines;
         let ignored_pipeline_ids = &self.ignored_pipeline_ids;
-        let sparkline = Self::status_line(self.auto_refresh);
+        let sparkline = Self::status_line(&*state, self.auto_refresh);
         let pipelines_select_for_diff = &self.pipelines_select_for_diff;
+        let modal = self.modal.clone();
 
         self.terminal.as_mut().unwrap().draw(|rect| {
             let mut items: Vec<_> = vec![];
@@ -1295,18 +1394,21 @@ impl Main {
             let chunks = Self::divide_for_status_line(rect.size());
             rect.render_stateful_widget(pipelines, chunks[0], selected_pipeline);
             rect.render_widget(sparkline, chunks[1]);
+
+            Self::draw_modal(&modal, rect)
         })?;
 
         Ok(())
     }
 
     async fn draw_jobs(&mut self) -> Result<(), Error> {
-        let sparkline = Self::status_line(self.auto_refresh);
         let state = self.state.lock().await;
+        let sparkline = Self::status_line(&*state, self.auto_refresh);
 
         state.jobs.fix_selected(&mut self.selected_job, None);
         let printed_jobs = &mut self.jobs;
         let selected_job = &mut self.selected_job;
+        let modal = self.modal.clone();
 
         printed_jobs.clear();
 
@@ -1362,6 +1464,8 @@ impl Main {
             let chunks = Self::divide_for_status_line(rect.size());
             rect.render_stateful_widget(jobs, chunks[0], selected_job);
             rect.render_widget(sparkline, chunks[1]);
+
+            Self::draw_modal(&modal, rect)
         })?;
 
         Ok(())
@@ -1391,9 +1495,73 @@ impl Main {
         Ok(())
     }
 
+    fn draw_modal(info: &Option<Request>, f: &mut tui::Frame<CrosstermBackend<std::io::Stdout>>) {
+        let info = if let Some(info) = info {
+            info
+        } else {
+            return;
+        };
+
+        use tui::{
+            text::Spans,
+            layout::{Rect, Alignment},
+            widgets::{Clear, Paragraph},
+        };
+
+        fn centered_rect(percent_x: u16, size: u16, r: Rect) -> Rect {
+            let popup_layout = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Percentage(50),
+                    Constraint::Min(size),
+                    Constraint::Percentage(50),
+                ].as_ref())
+                .split(r);
+
+            Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints(
+                    [
+                    Constraint::Percentage((100 - percent_x) / 2),
+                    Constraint::Percentage(percent_x),
+                    Constraint::Percentage((100 - percent_x) / 2),
+                    ]
+                    .as_ref(),
+                )
+                .split(popup_layout[1])[1]
+        }
+
+        let size = f.size();
+
+        let widget = Paragraph::new(vec![
+                Spans::from(vec![Span::raw("")]),
+                Spans::from(
+                    match info {
+                        Request::DeletePipeline(pipeline_id) => {
+                            vec![Span::raw("Deletion of Pipeline "),
+                                 Span::styled(format!("{}", pipeline_id),Style::default().fg(Color::LightBlue))]
+                        }
+                        Request::CancelPipeline(pipeline_id) => {
+                            vec![Span::raw("Cancellation of Pipeline "),
+                                 Span::styled(format!("{}", pipeline_id),Style::default().fg(Color::LightBlue))]
+                        }
+                    },
+                ),
+                Spans::from(vec![Span::raw("")]),
+                Spans::from(vec![Span::raw("Press 'y' to confirm, 'n/'q'/ESC to cancel")]),
+                Spans::from(vec![Span::raw("")]),
+            ])
+            .alignment(Alignment::Center)
+            .block(Block::default().title("Confirmation").borders(Borders::ALL));
+        let area = centered_rect(60, 7, size);
+
+        f.render_widget(Clear, area); //this clears out the background
+        f.render_widget(widget, area);
+    }
+
     async fn draw_pipediff(&mut self, info: PipeDiff) -> Result<(), Error> {
-        let sparkline = Self::status_line(self.auto_refresh);
-        let state = self.state.lock().await;
+        let mut state = self.state.lock().await;
+        let sparkline = Self::status_line(&mut *state, self.auto_refresh);
 
         state.pipediff.fix_selected(&mut self.selected_job, None);
         let printed_pipediffs = &mut self.pipediffs;
@@ -1479,6 +1647,7 @@ impl Main {
         match self.mode {
             RunMode::Help => self.help.previous(),
             RunMode::None => {}
+            RunMode::Modal{..} => {}
             RunMode::Jobs(_) => state.jobs.up(&mut self.selected_job, None),
             RunMode::Pipelines(_) => state.pipelines.up(&mut self.selected_pipeline, None),
             RunMode::PipeDiff { .. } => state.pipediff.up(&mut self.selected_pipediff, None),
@@ -1492,6 +1661,7 @@ impl Main {
 
         match self.mode {
             RunMode::None => {}
+            RunMode::Modal{..} => {}
             RunMode::Help => self.help.next(),
             RunMode::Jobs(_) => state
                 .jobs
@@ -1512,6 +1682,7 @@ impl Main {
 
         match self.mode {
             RunMode::None => {}
+            RunMode::Modal{..} => {}
             RunMode::Help => {}
             RunMode::Jobs(_) => state.jobs.home(&mut self.selected_job, None),
             RunMode::Pipelines(_) => state.pipelines.home(&mut self.selected_pipeline, None),
@@ -1525,6 +1696,7 @@ impl Main {
         let state = self.state.lock().await;
 
         match self.mode {
+            RunMode::Modal{..} => {}
             RunMode::Help => {}
             RunMode::None => {}
             RunMode::Jobs(_) => state
@@ -1599,6 +1771,7 @@ impl Main {
     async fn on_enter(&mut self) -> Result<(), Error> {
         match self.mode {
             RunMode::None => {}
+            RunMode::Modal{..} => {}
             RunMode::Help => {}
             RunMode::Jobs(ref info) => {
                 if let Some(selected) = self.selected_job.selected() {
@@ -1746,6 +1919,7 @@ impl Main {
     fn open_browser(&mut self) -> Result<(), Error> {
         match self.mode {
             RunMode::None => {}
+            RunMode::Modal{..} => {}
             RunMode::Help => {}
             RunMode::Jobs(_) => {
                 if let Some(selected) = self.selected_job.selected() {
@@ -1783,6 +1957,7 @@ impl Main {
     fn toggle_username_resolve(&mut self) -> Result<(), Error> {
         match &mut self.mode {
             RunMode::None => {}
+            RunMode::Modal{..} => {}
             RunMode::Help => {}
             RunMode::Jobs(_) => {}
             RunMode::PipeDiff(_) => {}
@@ -1795,8 +1970,89 @@ impl Main {
         Ok(())
     }
 
+    fn delete_pipeline(&mut self) -> Result<(), Error> {
+        match &mut self.mode {
+            RunMode::Modal{..} => {}
+            RunMode::None => {}
+            RunMode::Help => {}
+            RunMode::Jobs(info) => {
+                let pipeline_id = info.pipeline_id;
+                self.seek_request(Request::DeletePipeline(pipeline_id));
+                self.go_to_previous_mode()?;
+            }
+            RunMode::PipeDiff(_) => {}
+            RunMode::Pipelines(_) => {
+                if let Some(selected) = self.selected_pipeline.selected() {
+                    if selected < self.pipelines.len() {
+                        let pipeline = &self.pipelines[selected];
+                        let pipeline_id = pipeline.id;
+                        self.seek_request(Request::DeletePipeline(pipeline_id));
+                    }
+                }
+
+            }
+        }
+
+        Ok(())
+    }
+
+    fn cancel_pipeline(&mut self) -> Result<(), Error> {
+        match &mut self.mode {
+            RunMode::Modal{..} => {}
+            RunMode::None => {}
+            RunMode::Help => {}
+            RunMode::Jobs(info) => {
+                let pipeline_id = info.pipeline_id;
+                self.seek_request(Request::CancelPipeline(pipeline_id));
+            }
+            RunMode::PipeDiff(_) => {}
+            RunMode::Pipelines(_) => {
+                if let Some(selected) = self.selected_pipeline.selected() {
+                    if selected < self.pipelines.len() {
+                        let pipeline = &self.pipelines[selected];
+                        let pipeline_id = pipeline.id;
+                        self.seek_request(Request::CancelPipeline(pipeline_id));
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn seek_request(&mut self, request: Request) {
+        self.mode = RunMode::Modal(request, Box::new(self.mode.clone()));
+    }
+
+    async fn perform_request(&mut self, request: Request) -> Result<(), Error> {
+        {
+            let mut state = self.state.lock().await;
+            state.request_queue.push_front(request);
+        }
+        let _ = self.tx_cmd.try_send(RxCmd::Refresh);
+        Ok(())
+    }
+
+    async fn confirm_action(&mut self) -> Result<(), Error> {
+        match &mut self.mode {
+            RunMode::Modal(info, prev) => {
+                let info = info.clone();
+                self.mode = (**prev).to_owned();
+                self.perform_request(info).await?;
+            }
+            RunMode::None => {}
+            RunMode::Help => {}
+            RunMode::Jobs(_) => {}
+            RunMode::PipeDiff(_) => {}
+            RunMode::Pipelines(_info) => {}
+        }
+
+        Ok(())
+    }
+
     fn open_previous(&mut self) -> Result<(), Error> {
         match self.mode {
+            RunMode::Modal{..} => {}
             RunMode::None => {}
             RunMode::Help => {}
             RunMode::Jobs(_) => {}
@@ -1820,6 +2076,7 @@ impl Main {
 
     fn ignore_pipeline(&mut self) -> Result<(), Error> {
         match self.mode {
+            RunMode::Modal{..} => {}
             RunMode::None => {}
             RunMode::Help => {}
             RunMode::Jobs(_) => {}
@@ -1842,6 +2099,7 @@ impl Main {
 
     fn open_git_log(&mut self) -> Result<(), Error> {
         match self.mode {
+            RunMode::Modal{..} => {}
             RunMode::None => {}
             RunMode::Help => {}
             RunMode::Jobs(_) => {}
@@ -1886,10 +2144,14 @@ impl Main {
                     }
                     Action::Quit => self.leave = true,
                     Action::QuitOrGoBack => {
-                        if self.prev_mode.is_some() {
-                            self.go_to_previous_mode()?
+                        if let RunMode::Modal(_, prev) = &self.mode {
+                            self.mode = (**prev).to_owned();
                         } else {
-                            self.leave = true;
+                            if self.prev_mode.is_some() {
+                                self.go_to_previous_mode()?
+                            } else {
+                                self.leave = true;
+                            }
                         }
                     }
                     Action::Clear => self.ignored_pipeline_ids.clear(),
@@ -1923,7 +2185,13 @@ impl Main {
                     Action::Home => self.goto_top_of_list().await?,
                     Action::End => self.goto_end_of_list().await?,
                     Action::Delete => self.ignore_pipeline()?,
-                    Action::GoBack => self.go_to_previous_mode()?,
+                    Action::GoBack => {
+                        if let RunMode::Modal(_, prev) = &self.mode {
+                            self.mode = (**prev).to_owned();
+                        } else {
+                            self.go_to_previous_mode()?;
+                        }
+                    },
                     Action::SetToDiff => self.on_set_pipediff_range(false)?,
                     Action::SetFromDiff => self.on_set_pipediff_range(true)?,
                     Action::Enter => self.on_enter().await?,
@@ -1931,6 +2199,9 @@ impl Main {
                     Action::OpenPreviousInBrowser => self.open_previous()?,
                     Action::GitLog => self.open_git_log()?,
                     Action::ToggleUsernameResolve => self.toggle_username_resolve()?,
+                    Action::DeletePipeline => self.delete_pipeline()?,
+                    Action::CancelPipeline => self.cancel_pipeline()?,
+                    Action::ConfirmAction => self.confirm_action().await?,
                 }
             }
             _ => {}

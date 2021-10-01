@@ -1264,7 +1264,7 @@ impl Main {
         self.terminal.as_mut().unwrap().draw(|rect| {
             let mut items: Vec<_> = vec![];
             pipeline_ids.clear();
-            let mut widths = vec![Constraint::Length(8)];
+            let mut widths = vec![Constraint::Length(12)];
             if info.resolve_usernames {
                 widths.push(Constraint::Length(15));
             };
@@ -1455,8 +1455,8 @@ impl Main {
                 )
                 .highlight_style(Style::default().bg(Color::Rgb(60, 60, 80)))
                 .widths(&[
-                    Constraint::Length(9),
-                    Constraint::Length(9),
+                    Constraint::Length(12),
+                    Constraint::Length(12),
                     Constraint::Length(10),
                     Constraint::Length(40),
                 ]);

@@ -846,10 +846,14 @@ impl Main {
         let config_path = if let Some(config) = &opt.config {
             config.clone()
         } else {
-            if let Some(dir) = dirs::config_dir() {
-                dir.join("glim").join("config.toml")
+            if let Ok(path) = std::env::var("GLIM_CONFIG_PATH") {
+                PathBuf::from(path)
             } else {
-                return Err(Error::ConfigFile);
+                if let Some(dir) = dirs::config_dir() {
+                    dir.join("glim").join("config.toml")
+                } else {
+                    return Err(Error::ConfigFile);
+                }
             }
         };
 

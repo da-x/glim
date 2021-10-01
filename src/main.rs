@@ -1070,7 +1070,7 @@ impl Main {
             .add_no_mods(KeyCode::Char('y'), Action::ConfirmAction);
         self.key_map.add_ctrl(KeyCode::Char('c'), Action::Quit);
         self.key_map.add_ctrl(KeyCode::Char('x'), Action::DeletePipeline);
-        self.key_map.add_shift(KeyCode::Char('C'), Action::CancelPipeline);
+        self.key_map.add_shift(KeyCode::Char('c'), Action::CancelPipeline);
 
         self.help = util::StatefulList::with_items({
             let mut s = String::new();

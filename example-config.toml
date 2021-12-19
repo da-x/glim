@@ -42,4 +42,4 @@ project = "dev/project"
 # tracking branch resolution:
 #
 #     [hooks]
-#     remote_ref_command= "BRANCH=$(git symbolic-ref --short HEAD); v=$(git config --local --get branch.${BRANCH}.remote-ref || true); if [[ ! -z \"${v}\" ]] ; then echo $v ; else git rev-parse --abbrev-ref --symbolic-full-name @{u}; fi"
+#     remote_ref_command= "BRANCH=$(git symbolic-ref --short HEAD); v=$(git config --local --get branch.${BRANCH}.remote-ref || true); if [[ ! -z \"${v}\" ]] ; then echo $v ; else git rev-parse --abbrev-ref --symbolic-full-name @{u} | sed -r 's#[^/]+[/](.*)#\\1#g'; fi"

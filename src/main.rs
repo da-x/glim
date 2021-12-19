@@ -245,8 +245,8 @@ struct ConfigHooks {
     /// $GLCIM_API_KEY, $GLCIM_PROJECT
     open_job_command: Option<String>,
 
-    /// Shell command to provide the remote ref of the current branch. Defaults
-    /// to remote tracking branch via: `git rev-parse --abbrev-ref --symbolic-full-name @{u};`
+    /// Shell command to provide the remote ref of the current branch. Defaults to remote tracking
+    /// branch via: `git rev-parse --abbrev-ref --symbolic-full-name @{u} | sed -r 's#[^/]+[/](.*)#\\1#g';`
     remote_ref_command: Option<String>,
 }
 
@@ -798,7 +798,7 @@ impl Main {
         let script = if let Some(v) = &config.hooks.remote_ref_command {
             v.as_str()
         } else {
-            "git rev-parse --abbrev-ref --symbolic-full-name @{u}"
+            "git rev-parse --abbrev-ref --symbolic-full-name @{u} | sed -r 's#[^/]+[/](.*)#\\1#g'"
         };
         command.arg(script);
         let child = command.spawn()?;

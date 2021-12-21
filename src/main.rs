@@ -309,7 +309,7 @@ struct PipelineDetails {
     user: User,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 struct User {
     username: String,
 }
@@ -788,7 +788,9 @@ struct Main {
     non_interactive: bool,
     auto_refresh: bool,
     first_load: bool,
+    current_user: User,
 }
+
 impl Main {
     fn get_remote_branch(config: &Config) -> Result<String, Error> {
         let shell = std::env::var("SHELL")?;
@@ -964,6 +966,7 @@ impl Main {
         let mode = Self::command_mode_to_run_mode(&client, opt.command.clone(), &config).await?;
         let mode2 = mode.clone();
 
+        let current_user_ = current_user.clone();
         tokio::spawn(async move {
             let _r = Thread {
                 config: config2,
@@ -972,7 +975,7 @@ impl Main {
                 state: state2,
                 rx_cmd: rx,
                 rsp_sender,
-                current_user,
+                current_user: current_user_,
                 debug,
                 mode: mode2,
             }
@@ -1012,6 +1015,7 @@ impl Main {
             config,
             debug: opt.debug,
             modal: None,
+            current_user,
             pipediff_hide_unchanged: true,
             pipelines_select_for_diff: None,
             auto_refresh: !opt.disable_auto_refresh,
@@ -1260,6 +1264,7 @@ impl Main {
         let sparkline = Self::status_line(&*state, self.auto_refresh);
         let pipelines_select_for_diff = &self.pipelines_select_for_diff;
         let modal = self.modal.clone();
+        let current_user = &mut self.current_user;
 
         self.terminal.as_mut().unwrap().draw(|rect| {
             let mut items: Vec<_> = vec![];
@@ -1385,7 +1390,14 @@ impl Main {
                     Block::default()
                         .borders(Borders::ALL)
                         .style(Style::default().fg(Color::White))
-                        .title("Pipelines")
+                        .title(match (info.r#ref, info.all_users) {
+                            (Some(r#ref), false) =>
+                                format!("Pipelines (user {}, ref {})", &current_user.username, r#ref),
+                            (Some(r#ref), true) =>
+                                format!("Pipelines (all users, ref {})", r#ref),
+                            (None, false) => format!("Pipelines (user {})", &current_user.username),
+                            (None, true) => "Pipelines (all users)".to_owned(),
+                        })
                         .border_type(BorderType::Plain),
                 )
                 .highlight_style(Style::default().bg(Color::Rgb(60, 60, 80)))

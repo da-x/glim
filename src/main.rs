@@ -715,6 +715,7 @@ enum Action {
     OpenPreviousInBrowser,
     GitLog,
     ToggleUsernameResolve,
+    ToggleAllRefs,
     DeletePipeline,
     CancelPipeline,
     ConfirmAction,
@@ -747,6 +748,9 @@ impl std::fmt::Display for Action {
             Action::ToggleUsernameResolve => {
                 "Toggle username load when listing other users pipelines"
             }
+            Action::ToggleAllRefs => {
+                "In Pipelines mode, toggle between all refs or just the requested ref"
+            }
             Action::DeletePipeline => {
                 "Delete the current pipeline"
             }
@@ -777,6 +781,7 @@ struct Main {
     ignored_pipeline_ids: std::collections::HashSet<u64>,
     pipelines: Vec<Pipeline>,
     jobs: Vec<Job>,
+    r#ref_save: Option<String>,
     pipediffs: Vec<JobDiff>,
     config: Config,
     opt: CommandArgs,
@@ -897,7 +902,7 @@ impl Main {
                 if !info.all_refs {
                     if branch.len() > 0 {
                         return Ok(RunMode::Pipelines(PipelinesMode {
-                            all_users: true,
+                            all_users: false,
                             nr_pipelines,
                             resolve_usernames: false,
                             r#ref: Some(branch),
@@ -1008,6 +1013,7 @@ impl Main {
             ignored_pipeline_ids: Default::default(),
             pipelines: vec![],
             jobs: vec![],
+            r#ref_save: None,
             pipediffs: vec![],
             leave: false,
             non_interactive: opt.non_interactive,
@@ -1072,6 +1078,8 @@ impl Main {
             .add_no_mods(KeyCode::Char('u'), Action::ToggleUsernameResolve);
         self.key_map
             .add_no_mods(KeyCode::Char('y'), Action::ConfirmAction);
+        self.key_map
+            .add_no_mods(KeyCode::Tab, Action::ToggleAllRefs);
         self.key_map.add_ctrl(KeyCode::Char('c'), Action::Quit);
         self.key_map.add_ctrl(KeyCode::Char('x'), Action::DeletePipeline);
         self.key_map.add_shift(KeyCode::Char('c'), Action::CancelPipeline);
@@ -1982,6 +1990,29 @@ impl Main {
         Ok(())
     }
 
+    async fn toggle_all_refs(&mut self) -> Result<(), Error> {
+        match &mut self.mode {
+            RunMode::None => {}
+            RunMode::Modal{..} => {}
+            RunMode::Help => {}
+            RunMode::Jobs(_) => {}
+            RunMode::PipeDiff(_) => {}
+            RunMode::Pipelines(info) => {
+                if info.r#ref.is_some() {
+                    self.r#ref_save = info.r#ref.take();
+                } else if self.r#ref_save.is_some() {
+                    info.r#ref = self.r#ref_save.take();
+                }
+
+                let mut state = self.state.lock().await;
+                state.pipelines.data = None;
+                let _ = self.tx_cmd.try_send(RxCmd::UpdateMode(self.mode.clone()));
+            }
+        }
+
+        Ok(())
+    }
+
     fn delete_pipeline(&mut self) -> Result<(), Error> {
         match &mut self.mode {
             RunMode::Modal{..} => {}
@@ -2211,6 +2242,7 @@ impl Main {
                     Action::OpenPreviousInBrowser => self.open_previous()?,
                     Action::GitLog => self.open_git_log()?,
                     Action::ToggleUsernameResolve => self.toggle_username_resolve()?,
+                    Action::ToggleAllRefs => self.toggle_all_refs().await?,
                     Action::DeletePipeline => self.delete_pipeline()?,
                     Action::CancelPipeline => self.cancel_pipeline()?,
                     Action::ConfirmAction => self.confirm_action().await?,

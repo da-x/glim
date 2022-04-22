@@ -6,8 +6,7 @@
 
 use derive_builder::Builder;
 
-use gitlab::api::common::NameOrId;
-use gitlab::api::endpoint_prelude::*;
+use gitlab::api::{common::NameOrId, endpoint_prelude::*};
 
 /// Query for jobs within a pipeline.
 #[derive(Debug, Builder)]

@@ -8,26 +8,32 @@ use crossterm::{
     },
 };
 use futures_timer::Delay;
-use gitlab::api::projects::pipelines::PipelineOrderBy;
-use gitlab::api::AsyncQuery;
-use gitlab::api::{projects, users};
-use gitlab::{api::projects::jobs::JobScope, AsyncGitlab, GitlabBuilder};
+use gitlab::{
+    api::{
+        projects,
+        projects::{jobs::JobScope, pipelines::PipelineOrderBy},
+        users, AsyncQuery,
+    },
+    AsyncGitlab, GitlabBuilder,
+};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, VecDeque};
-use std::io::stdout;
-use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::{
+    collections::{BTreeMap, VecDeque},
+    io::stdout,
+    path::PathBuf,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use structopt::StructOpt;
 use thiserror::Error;
 use tokio::sync::Mutex;
-use tui::backend::CrosstermBackend;
-use tui::layout::Constraint;
-use tui::layout::{Direction, Layout};
-use tui::style::Modifier;
-use tui::widgets::{Block, Borders, Sparkline};
-use tui::widgets::{BorderType, Cell, List, ListItem, Row, Table};
-use tui::Terminal;
+use tui::{
+    backend::CrosstermBackend,
+    layout::{Constraint, Direction, Layout},
+    style::Modifier,
+    widgets::{Block, BorderType, Borders, Cell, List, ListItem, Row, Sparkline, Table},
+    Terminal,
+};
 
 use masof::keyaction::KeyMap;
 
@@ -80,7 +86,8 @@ struct PipelinesMode {
     #[structopt(name = "usernames-resolve", short = "u")]
     resolve_usernames: bool,
 
-    /// The git branch on which to show pipelines (if not specified - show all refs)
+    /// The git branch on which to show pipelines (if not specified - show all
+    /// refs)
     #[structopt(name = "ref", short = "r")]
     r#ref: Option<String>,
 }
@@ -245,8 +252,9 @@ struct ConfigHooks {
     /// $GLCIM_API_KEY, $GLCIM_PROJECT
     open_job_command: Option<String>,
 
-    /// Shell command to provide the remote ref of the current branch. Defaults to remote tracking
-    /// branch via: `git rev-parse --abbrev-ref --symbolic-full-name @{u} | sed -r 's#[^/]+[/](.*)#\\1#g';`
+    /// Shell command to provide the remote ref of the current branch. Defaults
+    /// to remote tracking branch via: `git rev-parse --abbrev-ref
+    /// --symbolic-full-name @{u} | sed -r 's#[^/]+[/](.*)#\\1#g';`
     remote_ref_command: Option<String>,
 }
 
@@ -400,7 +408,6 @@ impl<T> Updatable<Vec<T>> {
 
 type JobDiff = itertools::EitherOrBoth<(String, Job), (String, Job)>;
 
-
 #[derive(Default)]
 struct State {
     request_count: u64,
@@ -498,7 +505,7 @@ impl Thread {
                 RunMode::Help => {
                     return Ok(());
                 }
-                RunMode::Modal{..} => {}
+                RunMode::Modal { .. } => {}
                 RunMode::Jobs { .. } => {}
                 RunMode::PipeDiff { .. } => {}
                 RunMode::Pipelines(info) => {
@@ -550,7 +557,7 @@ impl Thread {
             match &self.mode {
                 RunMode::None => {}
                 RunMode::Help => {}
-                RunMode::Modal{..} => {}
+                RunMode::Modal { .. } => {}
                 RunMode::Jobs(info) => {
                     let mut jobs = vec![];
 
@@ -651,9 +658,8 @@ impl Thread {
                             .pipeline(pipeline_id)
                             .build()
                             .map_err(Error::BuilderError)?;
-                        let rsp : Result<_, _> = gitlab::api::raw(endpoint)
-                            .query_async(&self.gitlab)
-                            .await;
+                        let rsp: Result<_, _> =
+                            gitlab::api::raw(endpoint).query_async(&self.gitlab).await;
                         let mut state = self.state.lock().await;
                         state.pipelines.update = true;
                         state.jobs.update = true;
@@ -665,9 +671,8 @@ impl Thread {
                             .pipeline(pipeline_id)
                             .build()
                             .map_err(Error::BuilderError)?;
-                        let rsp : Result<_, _> = gitlab::api::raw(endpoint)
-                            .query_async(&self.gitlab)
-                            .await;
+                        let rsp: Result<_, _> =
+                            gitlab::api::raw(endpoint).query_async(&self.gitlab).await;
                         let mut state = self.state.lock().await;
                         state.pipelines.update = true;
                         state.jobs.update = true;
@@ -751,15 +756,9 @@ impl std::fmt::Display for Action {
             Action::ToggleAllRefs => {
                 "In Pipelines mode, toggle between all refs or just the requested ref"
             }
-            Action::DeletePipeline => {
-                "Delete the current pipeline"
-            }
-            Action::CancelPipeline => {
-                "Cancel the current pipeline"
-            }
-            Action::ConfirmAction => {
-                "When presented request for confirmation, confirm action"
-            }
+            Action::DeletePipeline => "Delete the current pipeline",
+            Action::CancelPipeline => "Cancel the current pipeline",
+            Action::ConfirmAction => "When presented request for confirmation, confirm action",
         };
         write!(f, "{}", s)?;
         Ok(())
@@ -852,8 +851,10 @@ impl Main {
                         let from_jobs = from_jobs?;
                         let to_jobs = to_jobs?;
 
-                        use std::fs::OpenOptions;
-                        use std::io::{BufWriter, Write};
+                        use std::{
+                            fs::OpenOptions,
+                            io::{BufWriter, Write},
+                        };
 
                         let file = OpenOptions::new()
                             .create(true)
@@ -878,9 +879,7 @@ impl Main {
         };
 
         match alias {
-            AliasCommands::Jobs(info) => {
-                Ok(Self::alias_job(info, config, client).await?)
-            }
+            AliasCommands::Jobs(info) => Ok(Self::alias_job(info, config, client).await?),
             AliasCommands::Pipelines(info) => {
                 let nr_pipelines = 50;
 
@@ -1081,8 +1080,10 @@ impl Main {
         self.key_map
             .add_no_mods(KeyCode::Tab, Action::ToggleAllRefs);
         self.key_map.add_ctrl(KeyCode::Char('c'), Action::Quit);
-        self.key_map.add_ctrl(KeyCode::Char('x'), Action::DeletePipeline);
-        self.key_map.add_shift(KeyCode::Char('c'), Action::CancelPipeline);
+        self.key_map
+            .add_ctrl(KeyCode::Char('x'), Action::DeletePipeline);
+        self.key_map
+            .add_shift(KeyCode::Char('c'), Action::CancelPipeline);
 
         self.help = util::StatefulList::with_items({
             let mut s = String::new();
@@ -1103,7 +1104,7 @@ impl Main {
                         break;
                     }
                     RunMode::Help => {}
-                    RunMode::Modal{..} => {}
+                    RunMode::Modal { .. } => {}
                     RunMode::Pipelines { .. } => {
                         if state
                             .pipelines
@@ -1191,12 +1192,8 @@ impl Main {
                 ret
             }
             RunMode::None => Ok(()),
-            RunMode::PipeDiff(info) => {
-                self.draw_pipediff(info).await
-            }
-            RunMode::Pipelines(info) => {
-                self.draw_pipelines(info).await
-            }
+            RunMode::PipeDiff(info) => self.draw_pipediff(info).await,
+            RunMode::Pipelines(info) => self.draw_pipelines(info).await,
             RunMode::Help => self.draw_help().await,
             RunMode::Jobs { .. } => self.draw_jobs().await,
         }
@@ -1399,10 +1396,11 @@ impl Main {
                         .borders(Borders::ALL)
                         .style(Style::default().fg(Color::White))
                         .title(match (info.r#ref, info.all_users) {
-                            (Some(r#ref), false) =>
-                                format!("Pipelines (user {}, ref {})", &current_user.username, r#ref),
-                            (Some(r#ref), true) =>
-                                format!("Pipelines (all users, ref {})", r#ref),
+                            (Some(r#ref), false) => format!(
+                                "Pipelines (user {}, ref {})",
+                                &current_user.username, r#ref
+                            ),
+                            (Some(r#ref), true) => format!("Pipelines (all users, ref {})", r#ref),
                             (None, false) => format!("Pipelines (user {})", &current_user.username),
                             (None, true) => "Pipelines (all users)".to_owned(),
                         })
@@ -1523,28 +1521,31 @@ impl Main {
         };
 
         use tui::{
+            layout::{Alignment, Rect},
             text::Spans,
-            layout::{Rect, Alignment},
             widgets::{Clear, Paragraph},
         };
 
         fn centered_rect(percent_x: u16, size: u16, r: Rect) -> Rect {
             let popup_layout = Layout::default()
                 .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Percentage(50),
-                    Constraint::Min(size),
-                    Constraint::Percentage(50),
-                ].as_ref())
+                .constraints(
+                    [
+                        Constraint::Percentage(50),
+                        Constraint::Min(size),
+                        Constraint::Percentage(50),
+                    ]
+                    .as_ref(),
+                )
                 .split(r);
 
             Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints(
                     [
-                    Constraint::Percentage((100 - percent_x) / 2),
-                    Constraint::Percentage(percent_x),
-                    Constraint::Percentage((100 - percent_x) / 2),
+                        Constraint::Percentage((100 - percent_x) / 2),
+                        Constraint::Percentage(percent_x),
+                        Constraint::Percentage((100 - percent_x) / 2),
                     ]
                     .as_ref(),
                 )
@@ -1554,28 +1555,38 @@ impl Main {
         let size = f.size();
 
         let widget = Paragraph::new(vec![
-                Spans::from(vec![Span::raw("")]),
-                Spans::from(
-                    match info {
-                        Request::DeletePipeline(pipeline_id) => {
-                            vec![Span::raw("Deletion of Pipeline "),
-                                 Span::styled(format!("{}", pipeline_id),Style::default().fg(Color::LightBlue))]
-                        }
-                        Request::CancelPipeline(pipeline_id) => {
-                            vec![Span::raw("Cancellation of Pipeline "),
-                                 Span::styled(format!("{}", pipeline_id),Style::default().fg(Color::LightBlue))]
-                        }
-                    },
-                ),
-                Spans::from(vec![Span::raw("")]),
-                Spans::from(vec![Span::raw("Press 'y' to confirm, 'n/'q'/ESC to cancel")]),
-                Spans::from(vec![Span::raw("")]),
-            ])
-            .alignment(Alignment::Center)
-            .block(Block::default().title("Confirmation").borders(Borders::ALL));
+            Spans::from(vec![Span::raw("")]),
+            Spans::from(match info {
+                Request::DeletePipeline(pipeline_id) => {
+                    vec![
+                        Span::raw("Deletion of Pipeline "),
+                        Span::styled(
+                            format!("{}", pipeline_id),
+                            Style::default().fg(Color::LightBlue),
+                        ),
+                    ]
+                }
+                Request::CancelPipeline(pipeline_id) => {
+                    vec![
+                        Span::raw("Cancellation of Pipeline "),
+                        Span::styled(
+                            format!("{}", pipeline_id),
+                            Style::default().fg(Color::LightBlue),
+                        ),
+                    ]
+                }
+            }),
+            Spans::from(vec![Span::raw("")]),
+            Spans::from(vec![Span::raw(
+                "Press 'y' to confirm, 'n/'q'/ESC to cancel",
+            )]),
+            Spans::from(vec![Span::raw("")]),
+        ])
+        .alignment(Alignment::Center)
+        .block(Block::default().title("Confirmation").borders(Borders::ALL));
         let area = centered_rect(60, 7, size);
 
-        f.render_widget(Clear, area); //this clears out the background
+        f.render_widget(Clear, area); // this clears out the background
         f.render_widget(widget, area);
     }
 
@@ -1667,7 +1678,7 @@ impl Main {
         match self.mode {
             RunMode::Help => self.help.previous(),
             RunMode::None => {}
-            RunMode::Modal{..} => {}
+            RunMode::Modal { .. } => {}
             RunMode::Jobs(_) => state.jobs.up(&mut self.selected_job, None),
             RunMode::Pipelines(_) => state.pipelines.up(&mut self.selected_pipeline, None),
             RunMode::PipeDiff { .. } => state.pipediff.up(&mut self.selected_pipediff, None),
@@ -1681,7 +1692,7 @@ impl Main {
 
         match self.mode {
             RunMode::None => {}
-            RunMode::Modal{..} => {}
+            RunMode::Modal { .. } => {}
             RunMode::Help => self.help.next(),
             RunMode::Jobs(_) => state
                 .jobs
@@ -1702,7 +1713,7 @@ impl Main {
 
         match self.mode {
             RunMode::None => {}
-            RunMode::Modal{..} => {}
+            RunMode::Modal { .. } => {}
             RunMode::Help => {}
             RunMode::Jobs(_) => state.jobs.home(&mut self.selected_job, None),
             RunMode::Pipelines(_) => state.pipelines.home(&mut self.selected_pipeline, None),
@@ -1716,7 +1727,7 @@ impl Main {
         let state = self.state.lock().await;
 
         match self.mode {
-            RunMode::Modal{..} => {}
+            RunMode::Modal { .. } => {}
             RunMode::Help => {}
             RunMode::None => {}
             RunMode::Jobs(_) => state
@@ -1791,7 +1802,7 @@ impl Main {
     async fn on_enter(&mut self) -> Result<(), Error> {
         match self.mode {
             RunMode::None => {}
-            RunMode::Modal{..} => {}
+            RunMode::Modal { .. } => {}
             RunMode::Help => {}
             RunMode::Jobs(ref info) => {
                 if let Some(selected) = self.selected_job.selected() {
@@ -1853,7 +1864,11 @@ impl Main {
         Ok(())
     }
 
-    async fn alias_job(info: AliasJobsMode, config: &Config, client: &AsyncGitlab) -> Result<RunMode, Error> {
+    async fn alias_job(
+        info: AliasJobsMode,
+        config: &Config,
+        client: &AsyncGitlab,
+    ) -> Result<RunMode, Error> {
         let pipeline_id = if let Some(id) = info.pipeline_id {
             id
         } else {
@@ -1880,7 +1895,8 @@ impl Main {
                             let timediff = Local::now().time() - pipeline.created_at.time();
                             timediff.num_seconds() >= max_time as i64 // Old pipe
                         } else if let Some(githash) = &info.wait_by_githash {
-                            &pipeline.sha != githash // Old pipe, not the githash we want
+                            &pipeline.sha != githash // Old pipe, not the
+                                                     // githash we want
                         } else {
                             false
                         }
@@ -1939,7 +1955,7 @@ impl Main {
     fn open_browser(&mut self) -> Result<(), Error> {
         match self.mode {
             RunMode::None => {}
-            RunMode::Modal{..} => {}
+            RunMode::Modal { .. } => {}
             RunMode::Help => {}
             RunMode::Jobs(_) => {
                 if let Some(selected) = self.selected_job.selected() {
@@ -1977,7 +1993,7 @@ impl Main {
     fn toggle_username_resolve(&mut self) -> Result<(), Error> {
         match &mut self.mode {
             RunMode::None => {}
-            RunMode::Modal{..} => {}
+            RunMode::Modal { .. } => {}
             RunMode::Help => {}
             RunMode::Jobs(_) => {}
             RunMode::PipeDiff(_) => {}
@@ -1993,7 +2009,7 @@ impl Main {
     async fn toggle_all_refs(&mut self) -> Result<(), Error> {
         match &mut self.mode {
             RunMode::None => {}
-            RunMode::Modal{..} => {}
+            RunMode::Modal { .. } => {}
             RunMode::Help => {}
             RunMode::Jobs(_) => {}
             RunMode::PipeDiff(_) => {}
@@ -2015,7 +2031,7 @@ impl Main {
 
     fn delete_pipeline(&mut self) -> Result<(), Error> {
         match &mut self.mode {
-            RunMode::Modal{..} => {}
+            RunMode::Modal { .. } => {}
             RunMode::None => {}
             RunMode::Help => {}
             RunMode::Jobs(info) => {
@@ -2032,7 +2048,6 @@ impl Main {
                         self.seek_request(Request::DeletePipeline(pipeline_id));
                     }
                 }
-
             }
         }
 
@@ -2041,7 +2056,7 @@ impl Main {
 
     fn cancel_pipeline(&mut self) -> Result<(), Error> {
         match &mut self.mode {
-            RunMode::Modal{..} => {}
+            RunMode::Modal { .. } => {}
             RunMode::None => {}
             RunMode::Help => {}
             RunMode::Jobs(info) => {
@@ -2095,7 +2110,7 @@ impl Main {
 
     fn open_previous(&mut self) -> Result<(), Error> {
         match self.mode {
-            RunMode::Modal{..} => {}
+            RunMode::Modal { .. } => {}
             RunMode::None => {}
             RunMode::Help => {}
             RunMode::Jobs(_) => {}
@@ -2119,7 +2134,7 @@ impl Main {
 
     fn ignore_pipeline(&mut self) -> Result<(), Error> {
         match self.mode {
-            RunMode::Modal{..} => {}
+            RunMode::Modal { .. } => {}
             RunMode::None => {}
             RunMode::Help => {}
             RunMode::Jobs(_) => {}
@@ -2142,7 +2157,7 @@ impl Main {
 
     fn open_git_log(&mut self) -> Result<(), Error> {
         match self.mode {
-            RunMode::Modal{..} => {}
+            RunMode::Modal { .. } => {}
             RunMode::None => {}
             RunMode::Help => {}
             RunMode::Jobs(_) => {}
@@ -2234,7 +2249,7 @@ impl Main {
                         } else {
                             self.go_to_previous_mode()?;
                         }
-                    },
+                    }
                     Action::SetToDiff => self.on_set_pipediff_range(false)?,
                     Action::SetFromDiff => self.on_set_pipediff_range(true)?,
                     Action::Enter => self.on_enter().await?,

@@ -460,7 +460,7 @@ impl Thread {
                 )
                 .build()
                 .map_err(Error::BuilderError)?;
-            let endpoint = gitlab::api::paged(endpoint, gitlab::api::Pagination::Limit(300));
+            let endpoint = gitlab::api::paged(endpoint, gitlab::api::Pagination::All);
             let jobs_query = endpoint.query_async(gitlab);
 
             let gitlab = gitlab.clone();
@@ -469,7 +469,7 @@ impl Thread {
                 .pipeline(pipeline_id)
                 .build()
                 .map_err(Error::BuilderError)?;
-            let endpoint = gitlab::api::paged(endpoint, gitlab::api::Pagination::Limit(3));
+            let endpoint = gitlab::api::paged(endpoint, gitlab::api::Pagination::All);
             let bridges_query = endpoint.query_async(&gitlab);
 
             let (jobs_result, bridges_result) = futures::join!(jobs_query, bridges_query);

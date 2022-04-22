@@ -313,7 +313,6 @@ impl Job {
 
 #[derive(Debug, Deserialize)]
 struct PipelineDetails {
-    id: u64,
     user: User,
 }
 

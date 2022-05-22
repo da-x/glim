@@ -241,8 +241,17 @@ struct Config {
     #[serde(default)]
     cert_insecure: bool,
 
+    #[serde(default = "Config::default_refresh")]
+    refresh: u64,
+
     #[serde(default)]
     hooks: ConfigHooks,
+}
+
+impl Config {
+    fn default_refresh() -> u64 {
+        10
+    }
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]
@@ -1114,7 +1123,7 @@ impl Main {
                     RunMode::Pipelines { .. } => {
                         if state
                             .pipelines
-                            .check_expiry(std::time::Duration::from_millis(10000))
+                            .check_expiry(std::time::Duration::from_millis(self.config.refresh * 100))
                         {
                             updates += 1;
                         }
@@ -1122,7 +1131,7 @@ impl Main {
                     RunMode::Jobs { .. } => {
                         if state
                             .jobs
-                            .check_expiry(std::time::Duration::from_millis(10000))
+                            .check_expiry(std::time::Duration::from_millis(self.config.refresh * 1000))
                         {
                             updates += 1;
                         }
@@ -1130,14 +1139,16 @@ impl Main {
                     RunMode::PipeDiff { .. } => {
                         if state
                             .pipediff
-                            .check_expiry(std::time::Duration::from_millis(60000))
+                            .check_expiry(std::time::Duration::from_millis(self.config.refresh * 1000))
                         {
                             updates += 1;
                         }
                     }
                 }
                 if let Some((instant, _)) = &state.response {
-                    if instant.elapsed() > std::time::Duration::from_secs(5) {
+                    if instant.elapsed() > std::time::Duration::from_secs(
+                        std::cmp::max(self.config.refresh / 2, 1)
+                    ) {
                         state.response = None;
                         updates += 1;
                     }

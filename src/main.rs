@@ -239,6 +239,9 @@ struct Config {
     cookie: Option<String>,
 
     #[serde(default)]
+    cert_insecure: bool,
+
+    #[serde(default)]
     hooks: ConfigHooks,
 }
 
@@ -947,7 +950,11 @@ impl Main {
         let config = settings.try_into::<Config>()?;
         let config2 = config.clone();
 
-        let builder = GitlabBuilder::new(&config.hostname, &config.api_key);
+        let mut builder = GitlabBuilder::new(&config.hostname, &config.api_key);
+        if config.cert_insecure {
+            builder.cert_insecure();
+        }
+        let builder = builder;
 
         // Create the client.
         let client = builder.build_async().await?;

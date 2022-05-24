@@ -18,15 +18,20 @@ front-program() {
     # See issue: https://gitlab.com/gitlab-org/gitlab/-/issues/216738
     #
 
+    local curl_params=""
+    if [[ "${GLCIM_CERT_INSECURE}" == "true" ]] ; then
+	curl_params="-k"
+    fi
+
     while [ 1 ] ; do
 	if [[ "${GLCIM_COOKIE}" != "" ]] ; then
 	    curl \
-		--header "Cookie: _gitlab_session="$GLCIM_COOKIE \
+		${curl_params} --header "Cookie: _gitlab_session="$GLCIM_COOKIE \
 		https://${GLCIM_HOSTNAME}/${GLCIM_PROJECT}/-/jobs/${GLCIM_JOB_ID}/raw \
 		-L -s -o ${1} -C -
 	else
 	    curl \
-		--header "PRIVATE-TOKEN: ${GLCIM_API_KEY}" \
+		${curl_params} --header "PRIVATE-TOKEN: ${GLCIM_API_KEY}" \
 		"https://${GLCIM_HOSTNAME}/api/v4/projects/${project}/jobs/"${GLCIM_JOB_ID}"/trace" \
 		-L -s -o ${1} -C -
 	fi
@@ -61,7 +66,7 @@ tail-program() {
 }
 
 tmux-split() {
-    local params="GLCIM_HOSTNAME=${GLCIM_HOSTNAME} GLCIM_PIPELINE_ID=${GLCIM_PIPELINE_ID} GLCIM_JOB_ID=${GLCIM_JOB_ID} GLCIM_PROJECT=${GLCIM_PROJECT}"
+    local params="GLCIM_HOSTNAME=${GLCIM_HOSTNAME} GLCIM_PIPELINE_ID=${GLCIM_PIPELINE_ID} GLCIM_CERT_INSECURE=${GLCIM_CERT_INSECURE} GLCIM_JOB_ID=${GLCIM_JOB_ID} GLCIM_PROJECT=${GLCIM_PROJECT}"
 
     set +e
 
@@ -75,7 +80,7 @@ tmux-split() {
     done < <(tmux list-panes -F '#{pane_id} #{pane_start_command}')
 
     # Splitting a new window
-    tmux split-window -P "GLCIM_API_KEY=${GLCIM_API_KEY} ${params} GLCIM_COOKIE=${GLCIM_COOKIE} GLCIM_JOB_NAME=\"${GLCIM_JOB_NAME}\" ${BASH_SOURCE} tail-program"
+    tmux split-window -P "GLCIM_API_KEY=${GLCIM_API_KEY} ${params} GLCIM_COOKIE=${GLCIM_COOKIE} GLCIM_CERT_INSECURE=${GLCIM_CERT_INSECURE} GLCIM_JOB_NAME=\"${GLCIM_JOB_NAME}\" ${BASH_SOURCE} tail-program"
 }
 
 "$@"

@@ -1852,6 +1852,7 @@ impl Main {
         command.env("GLCIM_PROJECT", &self.config.project);
         command.env("GLCIM_HOSTNAME", &self.config.hostname);
         command.env("GLCIM_API_KEY", &self.config.api_key);
+        command.env("GLCIM_CERT_INSECURE", format!("{:?}", self.config.cert_insecure));
 
         if let Some(cookie) = &self.config.cookie {
             command.env("GLCIM_COOKIE", &cookie);

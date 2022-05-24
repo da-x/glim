@@ -4,7 +4,7 @@
 # Use with tmux in the following manner:
 #
 # [hooks]
-# open_job_command = "~/.config/glim/open-job.sh tmux-split"
+# open_job_command = "~/.config/glim/job-mgmt.sh tmux-split"
 #
 
 front-program() {
@@ -32,6 +32,10 @@ front-program() {
 	fi
 	sleep 1
     done
+}
+
+retry-job() {
+    :
 }
 
 tail-program() {

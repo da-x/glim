@@ -121,6 +121,7 @@ enum RunMode {
 enum Request {
     DeletePipeline(u64),
     CancelPipeline(u64),
+    RetryJob(u64),
 }
 
 #[derive(Debug, StructOpt, Clone)]
@@ -254,15 +255,19 @@ impl Config {
     }
 }
 
+/// Shell command to execute when opening a Job (using $SHELL).
+///
+/// The following environment variables will be defined:
+///
+/// $GLCIM_JOB_ID, $GLCIM_JOB_NAME, $GLCIM_PIPELINE_ID, $GLCIM_HOSTNAME,
+/// $GLCIM_API_KEY, $GLCIM_PROJECT, $GLCIM_CERT_SECURE
 #[derive(Debug, Deserialize, Clone, Default)]
 struct ConfigHooks {
     /// Shell command to execute when opening a Job (using $SHELL).
-    ///
-    /// The following environment variables will be defined:
-    ///
-    /// $GLCIM_JOB_ID, $GLCIM_JOB_NAME, $GLCIM_PIPELINE_ID, $GLCIM_HOSTNAME,
-    /// $GLCIM_API_KEY, $GLCIM_PROJECT
     open_job_command: Option<String>,
+
+    /// Shell command to execute when retrying a Job (using $SHELL).
+    retry_job_command: Option<String>,
 
     /// Shell command to provide the remote ref of the current branch. Defaults
     /// to remote tracking branch via: `git rev-parse --abbrev-ref
@@ -689,6 +694,19 @@ impl Thread {
                         state.jobs.update = true;
                         (rsp, "Pipeline cancellation")
                     }
+                    Request::RetryJob(job_id) => {
+                        let endpoint = projects::jobs::RetryJob::builder()
+                            .project(self.config.project.clone())
+                            .job(job_id)
+                            .build()
+                            .map_err(Error::BuilderError)?;
+                        let rsp: Result<_, _> =
+                            gitlab::api::raw(endpoint).query_async(&self.gitlab).await;
+                        let mut state = self.state.lock().await;
+                        state.pipelines.update = true;
+                        state.jobs.update = true;
+                        (rsp, "Job retry")
+                    }
                 };
 
                 let mut state = self.state.lock().await;
@@ -734,6 +752,7 @@ enum Action {
     ToggleAllRefs,
     DeletePipeline,
     CancelPipeline,
+    Retry,
     ConfirmAction,
 }
 
@@ -769,6 +788,7 @@ impl std::fmt::Display for Action {
             }
             Action::DeletePipeline => "Delete the current pipeline",
             Action::CancelPipeline => "Cancel the current pipeline",
+            Action::Retry => "Retry the current job",
             Action::ConfirmAction => "When presented request for confirmation, confirm action",
         };
         write!(f, "{}", s)?;
@@ -1099,6 +1119,8 @@ impl Main {
             .add_ctrl(KeyCode::Char('x'), Action::DeletePipeline);
         self.key_map
             .add_shift(KeyCode::Char('c'), Action::CancelPipeline);
+        self.key_map
+            .add_ctrl(KeyCode::Char('r'), Action::Retry);
 
         self.help = util::StatefulList::with_items({
             let mut s = String::new();
@@ -1592,6 +1614,15 @@ impl Main {
                         ),
                     ]
                 }
+                Request::RetryJob(job_id) => {
+                    vec![
+                        Span::raw("Retry of Job "),
+                        Span::styled(
+                            format!("{}", job_id),
+                            Style::default().fg(Color::LightBlue),
+                        ),
+                    ]
+                }
             }),
             Spans::from(vec![Span::raw("")]),
             Spans::from(vec![Span::raw(
@@ -1794,26 +1825,40 @@ impl Main {
     }
 
     fn on_enter_job(&self, job: &Job, pipeline_id: u64) -> Result<(), Error> {
-        if let Some(open_job_command) = &self.config.hooks.open_job_command {
-            let shell = std::env::var("SHELL")?;
-            let mut command = std::process::Command::new(shell);
-            command.arg("-c");
-            command.arg(open_job_command);
-            command.env("GLCIM_JOB_ID", format!("{}", job.id));
-            command.env("GLCIM_JOB_NAME", format!("{}", job.name));
-            command.env("GLCIM_PIPELINE_ID", format!("{}", pipeline_id));
-            command.env("GLCIM_PROJECT", &self.config.project);
-            command.env("GLCIM_HOSTNAME", &self.config.hostname);
-            command.env("GLCIM_API_KEY", &self.config.api_key);
-            if let Some(cookie) = &self.config.cookie {
-                command.env("GLCIM_COOKIE", &cookie);
-            }
-            if let Ok(mut v) = command.spawn() {
-                let _ = v.wait();
-            }
+        if let Some(command) = &self.config.hooks.open_job_command {
+            self.run_hook_script_for_job(command, job, pipeline_id)?;
         }
 
         Ok(())
+    }
+
+    fn on_retry_job(&self, job: &Job, pipeline_id: u64) -> Result<(), Error> {
+        if let Some(command) = &self.config.hooks.retry_job_command {
+            self.run_hook_script_for_job(command, job, pipeline_id)?;
+        }
+
+        Ok(())
+    }
+
+    fn run_hook_script_for_job(&self, script: &String, job: &Job, pipeline_id: u64) -> Result<(), Error> {
+        let shell = std::env::var("SHELL")?;
+        let mut command = std::process::Command::new(shell);
+        command.arg("-c");
+        command.arg(script);
+
+        command.env("GLCIM_JOB_ID", format!("{}", job.id));
+        command.env("GLCIM_JOB_NAME", format!("{}", job.name));
+        command.env("GLCIM_PIPELINE_ID", format!("{}", pipeline_id));
+        command.env("GLCIM_PROJECT", &self.config.project);
+        command.env("GLCIM_HOSTNAME", &self.config.hostname);
+        command.env("GLCIM_API_KEY", &self.config.api_key);
+
+        if let Some(cookie) = &self.config.cookie {
+            command.env("GLCIM_COOKIE", &cookie);
+        }
+        Ok(if let Ok(mut v) = command.spawn() {
+            let _ = v.wait();
+        })
     }
 
     async fn on_enter(&mut self) -> Result<(), Error> {
@@ -2095,6 +2140,27 @@ impl Main {
         Ok(())
     }
 
+    fn retry(&mut self) -> Result<(), Error> {
+        match &self.mode {
+            RunMode::Modal { .. } => {}
+            RunMode::None => {}
+            RunMode::Help => {}
+            RunMode::Jobs(info) => {
+                if let Some(selected) = self.selected_job.selected() {
+                    if selected < self.jobs.len() {
+                        let job_info = &self.jobs[selected];
+                        let req = Request::RetryJob(job_info.id);
+                        self.on_retry_job(&job_info, info.pipeline_id)?;
+                        self.seek_request(req);
+                    }
+                }
+            }
+            RunMode::PipeDiff(_) => {}
+            RunMode::Pipelines(_) => {}
+        }
+
+        Ok(())
+    }
     fn seek_request(&mut self, request: Request) {
         self.mode = RunMode::Modal(request, Box::new(self.mode.clone()));
     }
@@ -2277,6 +2343,7 @@ impl Main {
                     Action::ToggleAllRefs => self.toggle_all_refs().await?,
                     Action::DeletePipeline => self.delete_pipeline()?,
                     Action::CancelPipeline => self.cancel_pipeline()?,
+                    Action::Retry => self.retry()?,
                     Action::ConfirmAction => self.confirm_action().await?,
                 }
             }

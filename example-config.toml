@@ -25,12 +25,13 @@ project = "dev/project"
 # ## Job log support ###
 #
 # To following hook determines how to implement the 'open job log' functionality.
-# For example, the `open-job.sh` script can be used to open it in a split tmux
+# For example, the `job-mgmt.sh` script can be used to open it in a split tmux
 # pane. For that, the `open_job_command` needs to point to the script, and the
 # tmux-split parameter is needed.
 #
 #     [hooks]
-#     open_job_command = "~/.config/glim/open-job.sh tmux-split"
+#     open_job_command = "~/.config/glim/job-mgmt.sh tmux-split"
+#     retry_job_command = "~/.config/glim/job-mgmt.sh retry-job"
 #
 #
 # ## Matching local branch to remote ref

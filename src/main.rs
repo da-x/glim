@@ -122,6 +122,7 @@ enum Request {
     DeletePipeline(u64),
     CancelPipeline(u64),
     RetryJob(u64),
+    RetryPipeline(u64),
 }
 
 #[derive(Debug, StructOpt, Clone)]
@@ -703,9 +704,20 @@ impl Thread {
                         let rsp: Result<_, _> =
                             gitlab::api::raw(endpoint).query_async(&self.gitlab).await;
                         let mut state = self.state.lock().await;
-                        state.pipelines.update = true;
                         state.jobs.update = true;
                         (rsp, "Job retry")
+                    }
+                    Request::RetryPipeline(pipeline_id) => {
+                        let endpoint = projects::pipelines::RetryPipeline::builder()
+                            .project(self.config.project.clone())
+                            .pipeline(pipeline_id)
+                            .build()
+                            .map_err(Error::BuilderError)?;
+                        let rsp: Result<_, _> =
+                            gitlab::api::raw(endpoint).query_async(&self.gitlab).await;
+                        let mut state = self.state.lock().await;
+                        state.pipelines.update = true;
+                        (rsp, "Pipeline retry")
                     }
                 };
 
@@ -1623,6 +1635,15 @@ impl Main {
                         ),
                     ]
                 }
+                Request::RetryPipeline(pipeline_id) => {
+                    vec![
+                        Span::raw("Retry of Pipeline "),
+                        Span::styled(
+                            format!("{}", pipeline_id),
+                            Style::default().fg(Color::LightBlue),
+                        ),
+                    ]
+                }
             }),
             Spans::from(vec![Span::raw("")]),
             Spans::from(vec![Span::raw(
@@ -2157,7 +2178,15 @@ impl Main {
                 }
             }
             RunMode::PipeDiff(_) => {}
-            RunMode::Pipelines(_) => {}
+            RunMode::Pipelines(_) => {
+                if let Some(selected) = self.selected_pipeline.selected() {
+                    if selected < self.pipelines.len() {
+                        let pipeline = &self.pipelines[selected];
+                        let pipeline_id = pipeline.id;
+                        self.seek_request(Request::RetryPipeline(pipeline_id));
+                    }
+                }
+            }
         }
 
         Ok(())

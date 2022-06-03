@@ -1334,9 +1334,16 @@ impl Main {
                 widths.push(Constraint::Length(5));
             }
 
+            let mut max_ref_len = 30;
+            if let Some((_, pipelines)) = &state.pipelines.data {
+                for pipeline in pipelines.iter() {
+                    max_ref_len = std::cmp::max(max_ref_len, pipeline.r#ref.len());
+                }
+            }
+
             widths.extend(vec![
                 Constraint::Length(10),
-                Constraint::Length(30),
+                Constraint::Length(max_ref_len as u16),
                 Constraint::Length(12),
                 Constraint::Length(19),
             ]);

@@ -78,6 +78,10 @@ struct PipelinesMode {
     #[structopt(name = "all-users", short = "a")]
     all_users: bool,
 
+    /// Provide a username to be used instead of the username of the API key user
+    #[structopt(name = "username", short = "u")]
+    custom_username: Option<String>,
+
     /// Number of pipelines to fetch
     #[structopt(name = "nr-pipelines", short = "n", default_value = "200")]
     nr_pipelines: usize,
@@ -153,6 +157,10 @@ struct AliasPipelines {
     /// Everyone's pipelines
     #[structopt(name = "everyone", short = "e")]
     everyone: bool,
+
+    /// Provide a username to be used instead of the username of the API key user
+    #[structopt(name = "username", short = "u")]
+    custom_username: Option<String>,
 }
 
 #[derive(Debug, StructOpt, Clone)]
@@ -623,7 +631,11 @@ impl Thread {
                         endpoint.project(self.config.project.clone());
                         endpoint.order_by(PipelineOrderBy::Id);
                         if !info.all_users {
-                            endpoint.username(&self.current_user.username);
+                            let username = match &info.custom_username {
+                                Some(custom_username) => { custom_username.as_str() }
+                                None => self.current_user.username.as_str()
+                            };
+                            endpoint.username(username);
                         }
                         if let Some(r#ref) = &info.r#ref {
                             endpoint.ref_(r#ref.to_owned());
@@ -938,6 +950,7 @@ impl Main {
                         nr_pipelines,
                         resolve_usernames: true,
                         r#ref: None,
+                        custom_username: None,
                     }));
                 }
 
@@ -948,6 +961,7 @@ impl Main {
                             nr_pipelines,
                             resolve_usernames: false,
                             r#ref: Some(branch),
+                            custom_username: info.custom_username.clone(),
                         }));
                     }
                 }
@@ -957,6 +971,7 @@ impl Main {
                     nr_pipelines,
                     resolve_usernames: false,
                     r#ref: None,
+                    custom_username: info.custom_username.clone(),
                 }));
             }
         }
@@ -1404,6 +1419,11 @@ impl Main {
                 }
             }
 
+            let username = match &info.custom_username {
+                Some(custom_username) => { custom_username.as_str() }
+                None => current_user.username.as_str()
+            };
+
             let pipelines = Table::new(items)
                 .header(Row::new({
                     let mut v = vec![Cell::from(Span::styled(
@@ -1456,10 +1476,10 @@ impl Main {
                         .title(match (info.r#ref, info.all_users) {
                             (Some(r#ref), false) => format!(
                                 "Pipelines (user {}, ref {})",
-                                &current_user.username, r#ref
+                                username, r#ref
                             ),
                             (Some(r#ref), true) => format!("Pipelines (all users, ref {})", r#ref),
-                            (None, false) => format!("Pipelines (user {})", &current_user.username),
+                            (None, false) => format!("Pipelines (user {})", username),
                             (None, true) => "Pipelines (all users)".to_owned(),
                         })
                         .border_type(BorderType::Plain),

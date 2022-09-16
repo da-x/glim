@@ -75,39 +75,39 @@ pub enum Error {
 #[derive(Debug, StructOpt, Clone)]
 struct PipelinesMode {
     /// Show the pipelines of all users, not the only the invocing user
-    #[structopt(name = "all-users", short = "a")]
+    #[structopt(long = "all-users", short = "a")]
     all_users: bool,
 
     /// Provide a username to be used instead of the username of the API key user
-    #[structopt(name = "username", short = "u")]
+    #[structopt(long = "username", short = "u")]
     custom_username: Option<String>,
 
     /// Number of pipelines to fetch
-    #[structopt(name = "nr-pipelines", short = "n", default_value = "200")]
+    #[structopt(long = "nr-pipelines", short = "n", default_value = "200")]
     nr_pipelines: usize,
 
     /// Avoid resolving usernames when showing pipelines of all users (slow!)
-    #[structopt(name = "usernames-resolve", short = "u")]
+    #[structopt(long = "usernames-resolve")]
     resolve_usernames: bool,
 
     /// The git branch on which to show pipelines (if not specified - show all
     /// refs)
-    #[structopt(name = "ref", short = "r")]
+    #[structopt(long = "ref", short = "r")]
     r#ref: Option<String>,
 }
 
 #[derive(Debug, StructOpt, Clone)]
 struct JobsMode {
-    #[structopt(name = "pipeline-id", short = "p")]
+    #[structopt(long = "pipeline-id", short = "p")]
     pipeline_id: u64,
 }
 
 #[derive(Debug, StructOpt, Clone)]
 struct PipeDiff {
-    #[structopt(name = "from")]
+    #[structopt(long = "from")]
     from: u64,
 
-    #[structopt(name = "to")]
+    #[structopt(long = "to")]
     to: u64,
 }
 
@@ -132,34 +132,34 @@ enum Request {
 #[derive(Debug, StructOpt, Clone)]
 struct AliasJobsMode {
     /// Use a specific pipeline number
-    #[structopt(name = "pipeline-id", short = "p")]
+    #[structopt(long = "pipeline-id", short = "p")]
     pipeline_id: Option<u64>,
 
     /// Wait for a new pipeline to be created, no older than given seconds
-    #[structopt(name = "wait-by-creation-time", short = "w")]
+    #[structopt(long = "wait-by-creation-time", short = "w")]
     wait_by_creation_time: Option<u64>,
 
     /// Wait for a new pipeline to be created, of the given hash
-    #[structopt(name = "wait-by-githash", short = "h")]
+    #[structopt(long = "wait-by-githash", short = "h")]
     wait_by_githash: Option<String>,
 }
 
 #[derive(Debug, StructOpt, Clone)]
 struct AliasPipelines {
     /// Your pipelines on all your branches instead of current one
-    #[structopt(name = "all", short = "a")]
+    #[structopt(long = "all", short = "a")]
     all_refs: bool,
 
     /// Show pipeines on specific ref
-    #[structopt(name = "ref", short = "r")]
+    #[structopt(long = "ref", short = "r")]
     specific_ref: Option<String>,
 
     /// Everyone's pipelines
-    #[structopt(name = "everyone", short = "e")]
+    #[structopt(long = "everyone", short = "e")]
     everyone: bool,
 
     /// Provide a username to be used instead of the username of the API key user
-    #[structopt(name = "username", short = "u")]
+    #[structopt(long = "username", short = "u")]
     custom_username: Option<String>,
 }
 
@@ -177,11 +177,11 @@ enum AliasCommands {
 #[derive(Debug, StructOpt, Clone)]
 struct TwoPipelinesReports {
     /// Report changes from the last two runs
-    #[structopt(name = "ref", short = "r")]
+    #[structopt(long = "ref", short = "r")]
     r#ref: String,
 
     /// Output file
-    #[structopt(name = "output_path", short = "o")]
+    #[structopt(long = "output_path", short = "o")]
     out_path: PathBuf,
 }
 
@@ -217,19 +217,19 @@ enum CommandMode {
 
 #[derive(Debug, StructOpt, Clone)]
 struct CommandArgs {
-    #[structopt(name = "config-file", short = "c")]
+    #[structopt(long = "config-file", short = "c")]
     config: Option<PathBuf>,
 
     /// Request debug mode - no TUI
-    #[structopt(name = "debug", short = "d")]
+    #[structopt(long = "debug", short = "d")]
     debug: bool,
 
     /// Non-interactive mode - print data and exit
-    #[structopt(name = "non-interactive", short = "n")]
+    #[structopt(long = "non-interactive", short = "n")]
     non_interactive: bool,
 
     /// Disable auto-refresh (reloading server data)
-    #[structopt(name = "disable-auto-refresh", short = "S")]
+    #[structopt(long = "disable-auto-refresh", short = "S")]
     disable_auto_refresh: bool,
 
     #[structopt(subcommand)]

@@ -57,12 +57,20 @@ tail-program() {
     if [[ "$1" == "-d" ]] ; then
 	echo ${outfile}
 	front-program ${outfile}
+    elif [[ "$1" == "-l" ]] ; then
+	front-program ${outfile} &
+	less +F -R ${outfile}
+	kill %1
     else
 	front-program ${outfile} &
 	tail -n 200000 -f ${outfile}
-
 	kill %1
     fi
+}
+
+tail-pager() {
+    clear
+    tail-program -l
 }
 
 tmux-split() {

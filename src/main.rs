@@ -273,14 +273,22 @@ impl Config {
 #[derive(Debug, Deserialize, Clone, Default)]
 struct ConfigHooks {
     /// Shell command to execute when opening a Job (using $SHELL).
+    #[serde(default)]
     open_job_command: Option<String>,
 
+    /// Set to true if the open_job_command spawns a terminal program to view
+    /// the job log.
+    #[serde(default)]
+    open_job_terminal: bool,
+
     /// Shell command to execute when retrying a Job (using $SHELL).
+    #[serde(default)]
     retry_job_command: Option<String>,
 
     /// Shell command to provide the remote ref of the current branch. Defaults
     /// to remote tracking branch via: `git rev-parse --abbrev-ref
     /// --symbolic-full-name @{u} | sed -r 's#[^/]+[/](.*)#\\1#g';`
+    #[serde(default)]
     remote_ref_command: Option<String>,
 }
 
@@ -1872,9 +1880,27 @@ impl Main {
         Ok(())
     }
 
-    fn on_enter_job(&self, job: &Job, pipeline_id: u64) -> Result<(), Error> {
+    fn on_enter_job(&mut self, job: &Job, pipeline_id: u64) -> Result<(), Error> {
+        let sigid = if self.config.hooks.open_job_terminal {
+            self.release_terminal()?;
+
+            // Prevent aborting the pager also kill glim
+            Some(unsafe {
+                signal_hook::low_level::register(signal_hook::consts::signal::SIGINT,
+                    || {})?
+            })
+        } else {
+            None
+        };
+
         if let Some(command) = &self.config.hooks.open_job_command {
             self.run_hook_script_for_job(command, job, pipeline_id)?;
+        }
+
+        if let Some(sigid) = sigid {
+            signal_hook::low_level::unregister(sigid);
+            self.gain_terminal()?;
+            self.terminal.as_mut().unwrap().clear()?;
         }
 
         Ok(())
@@ -1919,7 +1945,7 @@ impl Main {
                 if let Some(selected) = self.selected_job.selected() {
                     if selected < self.jobs.len() {
                         let job = &self.jobs[selected];
-                        self.on_enter_job(job, info.pipeline_id)?;
+                        self.on_enter_job(&job.clone(), info.pipeline_id)?;
                     }
                 }
             }
@@ -1928,7 +1954,7 @@ impl Main {
                     if selected < self.pipediffs.len() {
                         match &self.pipediffs[selected] {
                             itertools::EitherOrBoth::Both(_, (_, b)) => {
-                                self.on_enter_job(&b, info.to)?;
+                                self.on_enter_job(&b.clone(), info.to)?;
                             }
                             _ => {}
                         }
@@ -2199,7 +2225,7 @@ impl Main {
                     if selected < self.jobs.len() {
                         let job_info = &self.jobs[selected];
                         let req = Request::RetryJob(job_info.id);
-                        self.on_retry_job(&job_info, info.pipeline_id)?;
+                        self.on_retry_job(job_info, info.pipeline_id)?;
                         self.seek_request(req);
                     }
                 }
@@ -2259,7 +2285,7 @@ impl Main {
                     if selected < self.pipediffs.len() {
                         match &self.pipediffs[selected] {
                             itertools::EitherOrBoth::Both((_, a), _) => {
-                                self.on_enter_job(&a, info.from)?;
+                                self.on_enter_job(&a.clone(), info.from)?;
                             }
                             _ => {}
                         }

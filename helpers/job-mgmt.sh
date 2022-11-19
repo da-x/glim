@@ -60,7 +60,7 @@ tail-program() {
     elif [[ "$1" == "-l" ]] ; then
 	front-program ${outfile} &
 	less +F -R ${outfile}
-	kill %1
+	kill %1 2>/dev/null
     else
 	front-program ${outfile} &
 	tail -n 200000 -f ${outfile}

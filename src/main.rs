@@ -100,6 +100,9 @@ struct PipelinesMode {
 struct JobsMode {
     #[structopt(long = "pipeline-id", short = "p")]
     pipeline_id: u64,
+
+    #[structopt(long, short = "m")]
+    manual_jobs: bool,
 }
 
 #[derive(Debug, StructOpt, Clone)]
@@ -125,6 +128,7 @@ enum RunMode {
 enum Request {
     DeletePipeline(u64),
     CancelPipeline(u64),
+    PlayJob(u64),
     RetryJob(u64),
     RetryPipeline(u64),
 }
@@ -469,31 +473,43 @@ struct Thread {
     debug: bool,
 }
 
+#[derive(Copy, Clone)]
+enum JobDetailMode {
+    WithManual,
+    WithoutManual,
+}
+
 impl Thread {
     async fn get_jobs(
         pipeline_id: u64,
         config: &Config,
         gitlab: &AsyncGitlab,
+        job_detail_mode: JobDetailMode,
     ) -> Result<BTreeMap<String, Job>, Error> {
         let mut next_pipeline_id = Some(pipeline_id);
         let mut jobs = vec![];
 
         while let Some(pipeline_id) = next_pipeline_id.take() {
+            let mut scopes = vec![
+                JobScope::Pending,
+                JobScope::Running,
+                JobScope::Failed,
+                JobScope::Success,
+                JobScope::Canceled,
+            ];
+            match job_detail_mode {
+                JobDetailMode::WithManual => {
+                    scopes.push(JobScope::Manual);
+                },
+                JobDetailMode::WithoutManual => {},
+            }
             let endpoint = projects::pipelines::PipelineJobs::builder()
                 .project(config.project.clone())
                 .pipeline(pipeline_id)
-                .scopes(
-                    vec![
-                        JobScope::Pending,
-                        JobScope::Running,
-                        JobScope::Failed,
-                        JobScope::Success,
-                        JobScope::Canceled,
-                    ]
-                    .into_iter(),
-                )
+                .scopes(scopes.into_iter())
                 .build()
                 .map_err(Error::BuilderError)?;
+
             let endpoint = gitlab::api::paged(endpoint, gitlab::api::Pagination::All);
             let jobs_query = endpoint.query_async(gitlab);
 
@@ -595,7 +611,10 @@ impl Thread {
                     let mut jobs = vec![];
 
                     if self.state.lock().await.jobs.update {
-                        jobs = Self::get_jobs(info.pipeline_id, &self.config, &self.gitlab)
+                        jobs = Self::get_jobs(info.pipeline_id, &self.config, &self.gitlab, match info.manual_jobs {
+                            true => JobDetailMode::WithManual,
+                            false => JobDetailMode::WithoutManual,
+                        })
                             .await?
                             .values()
                             .into_iter()
@@ -613,9 +632,9 @@ impl Thread {
                 }
                 RunMode::PipeDiff(pipediff) => {
                     if self.state.lock().await.pipediff.update {
-                        let from = Self::get_jobs(pipediff.from, &self.config, &self.gitlab);
+                        let from = Self::get_jobs(pipediff.from, &self.config, &self.gitlab, JobDetailMode::WithoutManual);
                         let gitlab = self.gitlab.clone();
-                        let to = Self::get_jobs(pipediff.to, &self.config, &gitlab);
+                        let to = Self::get_jobs(pipediff.to, &self.config, &gitlab, JobDetailMode::WithoutManual);
                         let (from, to) = futures::join!(from, to);
                         let from = from?;
                         let to = to?;
@@ -727,6 +746,18 @@ impl Thread {
                         state.jobs.update = true;
                         (rsp, "Job retry")
                     }
+                    Request::PlayJob(job_id) => {
+                        let endpoint = projects::jobs::PlayJob::builder()
+                            .project(self.config.project.clone())
+                            .job(job_id)
+                            .build()
+                            .map_err(Error::BuilderError)?;
+                        let rsp: Result<_, _> =
+                            gitlab::api::raw(endpoint).query_async(&self.gitlab).await;
+                        let mut state = self.state.lock().await;
+                        state.jobs.update = true;
+                        (rsp, "Job play")
+                    }
                     Request::RetryPipeline(pipeline_id) => {
                         let endpoint = projects::pipelines::RetryPipeline::builder()
                             .project(self.config.project.clone())
@@ -782,9 +813,11 @@ enum Action {
     GitLog,
     ToggleUsernameResolve,
     ToggleAllRefs,
+    ToggleManualJobs,
     DeletePipeline,
     CancelPipeline,
     Retry,
+    PlayJob,
     ConfirmAction,
 }
 
@@ -818,9 +851,13 @@ impl std::fmt::Display for Action {
             Action::ToggleAllRefs => {
                 "In Pipelines mode, toggle between all refs or just the requested ref"
             }
+            Action::ToggleManualJobs => {
+                "In Jobs mode, toggle showing manual jobs"
+            }
             Action::DeletePipeline => "Delete the current pipeline",
             Action::CancelPipeline => "Cancel the current pipeline",
             Action::Retry => "Retry the current job",
+            Action::PlayJob => "Play the current manual job",
             Action::ConfirmAction => "When presented request for confirmation, confirm action",
         };
         write!(f, "{}", s)?;
@@ -908,8 +945,8 @@ impl Main {
                         let from = &pipelines[1];
 
                         let client2 = client.clone();
-                        let from_jobs = Thread::get_jobs(from.id, &config, &client2);
-                        let to_jobs = Thread::get_jobs(to.id, &config, &client);
+                        let from_jobs = Thread::get_jobs(from.id, &config, &client2, JobDetailMode::WithoutManual);
+                        let to_jobs = Thread::get_jobs(to.id, &config, &client, JobDetailMode::WithoutManual);
                         let (from_jobs, to_jobs) = futures::join!(from_jobs, to_jobs);
                         let from_jobs = from_jobs?;
                         let to_jobs = to_jobs?;
@@ -1147,6 +1184,10 @@ impl Main {
             .add_no_mods(KeyCode::Char('u'), Action::ToggleUsernameResolve);
         self.key_map
             .add_no_mods(KeyCode::Char('y'), Action::ConfirmAction);
+        self.key_map
+            .add_no_mods(KeyCode::Char('m'), Action::ToggleManualJobs);
+        self.key_map
+            .add_no_mods(KeyCode::Char('s'), Action::PlayJob);
         self.key_map
             .add_no_mods(KeyCode::Tab, Action::ToggleAllRefs);
         self.key_map.add_ctrl(KeyCode::Char('c'), Action::Quit);
@@ -1670,6 +1711,15 @@ impl Main {
                         ),
                     ]
                 }
+                Request::PlayJob(job_id) => {
+                    vec![
+                        Span::raw("Play of Job "),
+                        Span::styled(
+                            format!("{}", job_id),
+                            Style::default().fg(Color::LightBlue),
+                        ),
+                    ]
+                }
                 Request::RetryPipeline(pipeline_id) => {
                     vec![
                         Span::raw("Retry of Pipeline "),
@@ -1987,6 +2037,7 @@ impl Main {
                             &mut self.mode,
                             RunMode::Jobs(JobsMode {
                                 pipeline_id: pipeline.id,
+                                manual_jobs: false,
                             }),
                         ));
                         self.first_load = true;
@@ -2068,7 +2119,7 @@ impl Main {
             }
         };
 
-        Ok(RunMode::Jobs(JobsMode { pipeline_id }))
+        Ok(RunMode::Jobs(JobsMode { pipeline_id, manual_jobs: false }))
     }
 
     fn on_job_open_in_browser(&self, job_id: u64) -> Result<(), Error> {
@@ -2138,6 +2189,27 @@ impl Main {
                 info.resolve_usernames = !info.resolve_usernames;
                 let _ = self.tx_cmd.try_send(RxCmd::UpdateMode(self.mode.clone()));
             }
+        }
+
+        Ok(())
+    }
+
+    async fn toggle_manual_jobs(&mut self) -> Result<(), Error> {
+        match &mut self.mode {
+            RunMode::None => {}
+            RunMode::Modal { .. } => {}
+            RunMode::Help => {}
+            RunMode::Jobs(info) => {
+                info.manual_jobs = !info.manual_jobs;
+                let _ = self.tx_cmd.try_send(RxCmd::UpdateMode(self.mode.clone()));
+                {
+                    let mut state = self.state.lock().await;
+                    state.jobs.update = true;
+                }
+                let _ = self.tx_cmd.try_send(RxCmd::Refresh);
+            }
+            RunMode::PipeDiff(_) => {}
+            RunMode::Pipelines(_) => {}
         }
 
         Ok(())
@@ -2244,6 +2316,28 @@ impl Main {
 
         Ok(())
     }
+
+    fn play(&mut self) -> Result<(), Error> {
+        match &self.mode {
+            RunMode::Modal { .. } => {}
+            RunMode::None => {}
+            RunMode::Help => {}
+            RunMode::Jobs(_) => {
+                if let Some(selected) = self.selected_job.selected() {
+                    if selected < self.jobs.len() {
+                        let job_info = &self.jobs[selected];
+                        let req = Request::PlayJob(job_info.id);
+                        self.seek_request(req);
+                    }
+                }
+            }
+            RunMode::PipeDiff(_) => {}
+            RunMode::Pipelines(_) => {}
+        }
+
+        Ok(())
+    }
+
     fn seek_request(&mut self, request: Request) {
         self.mode = RunMode::Modal(request, Box::new(self.mode.clone()));
     }
@@ -2423,10 +2517,12 @@ impl Main {
                     Action::OpenPreviousInBrowser => self.open_previous()?,
                     Action::GitLog => self.open_git_log()?,
                     Action::ToggleUsernameResolve => self.toggle_username_resolve()?,
+                    Action::ToggleManualJobs => self.toggle_manual_jobs().await?,
                     Action::ToggleAllRefs => self.toggle_all_refs().await?,
                     Action::DeletePipeline => self.delete_pipeline()?,
                     Action::CancelPipeline => self.cancel_pipeline()?,
                     Action::Retry => self.retry()?,
+                    Action::PlayJob => self.play()?,
                     Action::ConfirmAction => self.confirm_action().await?,
                 }
             }

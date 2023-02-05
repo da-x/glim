@@ -165,6 +165,10 @@ struct AliasPipelines {
     /// Provide a username to be used instead of the username of the API key user
     #[structopt(long = "username", short = "u")]
     custom_username: Option<String>,
+
+    /// Number of pipelines to fetch
+    #[structopt(long = "nr-pipelines", short = "n", default_value = "50")]
+    nr_pipelines: usize,
 }
 
 #[derive(Debug, StructOpt, Clone)]
@@ -981,7 +985,7 @@ impl Main {
         match alias {
             AliasCommands::Jobs(info) => Ok(Self::alias_job(info, config, client).await?),
             AliasCommands::Pipelines(info) => {
-                let nr_pipelines = 50;
+                let nr_pipelines = info.nr_pipelines;
 
                 let branch = if let Some(ref_name) = info.specific_ref {
                     ref_name.clone()

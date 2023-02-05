@@ -5,22 +5,22 @@ authors = ["Dan Aloni"]
 edition = "2018"
 
 [dependencies]
-derive_builder = "~0.9"
-gitlab = "0.1311.2"
-serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1" }
+async-recursion = "0.2"
 chrono = "0.4"
 config = "0.10"
-tui = { version = "0.14", features = ["crossterm"] }
-thiserror = "1"
-structopt = "0.3"
-dirs = "3"
 crossterm = { version = "0.19", features = ["event-stream"] }
+derive_builder = "~0.9"
+dirs = "3"
 futures = "0.3"
 futures-timer = "2"
-tokio = {version = "1", features = ["rt", "process", "io-util", "rt-multi-thread"]}
-itertools = "*"
-webbrowser = "0.5"
+gitlab = "0.1311.2"
+itertools = "0.10"
 masof = { git = "https://github.com/da-x/masof", rev = "v0.1.3"}
-async-recursion = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1" }
 signal-hook = "0.3"
+structopt = "0.3"
+thiserror = "1"
+tokio = {version = "1", features = ["rt", "process", "io-util", "rt-multi-thread"]}
+tui = { version = "0.14", features = ["crossterm"] }
+webbrowser = "0.5"

@@ -1422,6 +1422,9 @@ impl Main {
 
     async fn check_report_non_interactive(&mut self) -> Result<bool, Error> {
         match &self.mode {
+            RunMode::Jobs { .. } => {
+                return Ok(true);
+            }
             RunMode::PipeDiff { .. } => {
                 return self.non_interactive_pipediff().await;
             }

@@ -34,6 +34,7 @@ use tui::{
     widgets::{Block, BorderType, Borders, Cell, List, ListItem, Row, Sparkline, Table},
     Terminal,
 };
+use tokio::time::sleep;
 
 use masof::keyaction::KeyMap;
 
@@ -70,6 +71,8 @@ pub enum Error {
     ConfigFile,
     #[error("Not enough pipelines")]
     NotEnoughPipelines,
+    #[error("Expected failure")]
+    ExpectedFailure,
 }
 
 #[derive(Debug, StructOpt, Clone)]
@@ -214,6 +217,10 @@ enum CommandMode {
     #[structopt(name = "jobs")]
     Jobs(JobsMode),
 
+    /// Wait for stuff to finish
+    #[structopt(name = "wait")]
+    Wait(WaitOptions),
+
     /// Interface for a git aliases that are sensitive to Git's state
     #[structopt(name = "from-alias")]
     FromAlias(AliasCommands),
@@ -221,6 +228,13 @@ enum CommandMode {
     /// Generate some non-interactive reports in JSON output
     #[structopt(name = "report")]
     FromReport(ReportCommands),
+}
+
+#[derive(Debug, StructOpt, Clone)]
+enum WaitOptions {
+    Pipeline {
+        id: u64,
+    }
 }
 
 #[derive(Debug, StructOpt, Clone)]
@@ -356,6 +370,7 @@ impl Job {
 #[derive(Debug, Deserialize)]
 struct PipelineDetails {
     user: User,
+    status: String,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -979,6 +994,11 @@ impl Main {
                     }
                 }
                 return Ok(RunMode::None);
+            },
+            CommandMode::Wait(opts) => {
+                let _ = Self::handle_wait(opts, config, client).await?;
+
+                return Ok(RunMode::None);
             }
         };
 
@@ -1024,6 +1044,66 @@ impl Main {
                 }));
             }
         }
+    }
+
+    async fn handle_wait(
+        opts: WaitOptions,
+        config: &Config,
+        client: &AsyncGitlab,
+    ) -> Result<(), Error> {
+        let is_error;
+
+        match opts {
+            WaitOptions::Pipeline { id } => {
+                let mut endpoint = projects::pipelines::Pipeline::builder();
+                endpoint.project(config.project.clone());
+                endpoint.pipeline(id);
+                let endpoint = endpoint.build()
+                    .map_err(Error::BuilderError)?;
+
+                let mut prev_state = None;
+
+                loop {
+                    let rsp: Result<_, _> = endpoint
+                        .query_async(client)
+                        .await;
+                    if let Err(err) = &rsp {
+                        if let gitlab::api::ApiError::Gitlab { msg } = &err {
+                            if msg == "404 Not found" {
+                                eprintln!("Pipeline not found");
+                                is_error = true;
+                                break;
+                            }
+                        }
+                    }
+                    let pipeline_details: PipelineDetails = rsp
+                        .map_err(|x| Error::BoxError(Box::new(x)))?;
+
+                    let new_state = Some(pipeline_details.status.clone());
+                    let str_status = pipeline_details.status.as_str();
+                    if new_state != prev_state {
+                        println!("Pipeline {} status: {}", id, pipeline_details.status);
+                    }
+                    match str_status {
+                        "success" | "failed" | "skipped" => {
+                            is_error = str_status != "success";
+                            break;
+                        }
+                        _ => {
+                        }
+                    }
+
+                    prev_state = new_state;
+                    sleep(Duration::from_millis(5000)).await;
+                }
+            },
+        }
+
+        if is_error {
+            return Err(Error::ExpectedFailure);
+        }
+
+        Ok(())
     }
 
     async fn new(opt: &CommandArgs) -> Result<Self, Error> {
@@ -2097,7 +2177,6 @@ impl Main {
                     };
 
                     if is_old_or_non_existant {
-                        use tokio::time::sleep;
                         if iterations == 0 {
                             let kind = if let Some(max_time) = info.wait_by_creation_time {
                                 format!(" (no older than {} seconds)", max_time)
@@ -2582,6 +2661,9 @@ fn main_wrap() -> Result<(), Error> {
 fn main() {
     match main_wrap() {
         Ok(()) => {}
+        Err(Error::ExpectedFailure) => {
+            std::process::exit(-1);
+        }
         Err(e) => {
             eprintln!("{}", e);
             std::process::exit(-1);

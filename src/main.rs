@@ -250,6 +250,10 @@ struct CommandArgs {
     #[structopt(long = "non-interactive", short = "n")]
     non_interactive: bool,
 
+    /// On non-interactive mode - emit json output on some commands
+    #[structopt(long = "json", short = "j")]
+    json_output: bool,
+
     /// Disable auto-refresh (reloading server data)
     #[structopt(long = "disable-auto-refresh", short = "S")]
     disable_auto_refresh: bool,
@@ -1403,6 +1407,9 @@ impl Main {
             RunMode::PipeDiff { .. } => {
                 return self.non_interactive_pipediff().await;
             }
+            RunMode::Pipelines { .. } => {
+                return self.non_interactive_pipelines().await;
+            }
             _ => {}
         };
 
@@ -1421,6 +1428,25 @@ impl Main {
                         }
                     }
                     _ => {}
+                }
+            }
+            return Ok(true);
+        }
+
+        Ok(false)
+    }
+
+    async fn non_interactive_pipelines(&mut self) -> Result<bool, Error> {
+        let state = self.state.lock().await;
+
+        if let Some((_, pipelines)) = &state.pipelines.data {
+            if self.opt.json_output {
+                for res in pipelines.iter() {
+                    println!("{}", serde_json::to_string(res)?);
+                }
+            } else {
+                for res in pipelines.iter() {
+                    println!("{:9}  {:10} {}  {}", res.id, res.status, &res.sha[..12], res.web_url);
                 }
             }
             return Ok(true);

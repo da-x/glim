@@ -97,6 +97,10 @@ struct PipelinesMode {
     /// refs)
     #[structopt(long = "ref", short = "r")]
     r#ref: Option<String>,
+
+    /// A Git commit hash from which to resolve pipelines
+    #[structopt(long = "hash", short = "h")]
+    commithash: Option<String>,
 }
 
 #[derive(Debug, StructOpt, Clone)]
@@ -160,6 +164,10 @@ struct AliasPipelines {
     /// Show pipeines on specific ref
     #[structopt(long = "ref", short = "r")]
     specific_ref: Option<String>,
+
+    /// Show pipeines on specific commithash
+    #[structopt(long = "hash", short = "h")]
+    specific_commithash: Option<String>,
 
     /// Everyone's pipelines
     #[structopt(long = "everyone", short = "e")]
@@ -687,6 +695,9 @@ impl Thread {
                             };
                             endpoint.username(username);
                         }
+                        if let Some(commithash) = &info.commithash {
+                            endpoint.sha(commithash);
+                        }
                         if let Some(r#ref) = &info.r#ref {
                             endpoint.ref_(r#ref.to_owned());
                         }
@@ -1011,10 +1022,14 @@ impl Main {
             AliasCommands::Pipelines(info) => {
                 let nr_pipelines = info.nr_pipelines;
 
-                let branch = if let Some(ref_name) = info.specific_ref {
-                    ref_name.clone()
+                let branch = if info.specific_commithash.is_none() {
+                    Some(if let Some(ref_name) = info.specific_ref {
+                        ref_name.clone()
+                    } else {
+                        Self::get_remote_branch(config)?
+                    })
                 } else {
-                    Self::get_remote_branch(config)?
+                    None
                 };
 
                 if info.everyone {
@@ -1024,17 +1039,19 @@ impl Main {
                         resolve_usernames: true,
                         r#ref: None,
                         custom_username: None,
+                        commithash: info.specific_commithash.clone(),
                     }));
                 }
 
                 if !info.all_refs {
-                    if branch.len() > 0 {
+                    if branch.is_some() {
                         return Ok(RunMode::Pipelines(PipelinesMode {
                             all_users: false,
                             nr_pipelines,
                             resolve_usernames: false,
-                            r#ref: Some(branch),
+                            r#ref: branch,
                             custom_username: info.custom_username.clone(),
+                            commithash: info.specific_commithash.clone(),
                         }));
                     }
                 }
@@ -1045,6 +1062,7 @@ impl Main {
                     resolve_usernames: false,
                     r#ref: None,
                     custom_username: info.custom_username.clone(),
+                    commithash: info.specific_commithash.clone(),
                 }));
             }
         }

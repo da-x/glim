@@ -22,7 +22,7 @@ use std::{
     io::stdout,
     path::PathBuf,
     sync::Arc,
-    time::{Duration, Instant},
+    time::{Duration, Instant}, process::Command,
 };
 use structopt::StructOpt;
 use thiserror::Error;
@@ -324,6 +324,9 @@ struct ConfigHooks {
     /// --symbolic-full-name @{u} | sed -r 's#[^/]+[/](.*)#\\1#g';`
     #[serde(default)]
     remote_ref_command: Option<String>,
+
+    #[serde(default)]
+    open_url_program: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -932,7 +935,7 @@ struct Main {
 impl Main {
     fn get_remote_branch(config: &Config) -> Result<String, Error> {
         let shell = std::env::var("SHELL")?;
-        let mut command = std::process::Command::new(shell);
+        let mut command = Command::new(shell);
         command.stdout(std::process::Stdio::piped());
         command.arg("-c");
         let script = if let Some(v) = &config.hooks.remote_ref_command {
@@ -2097,7 +2100,7 @@ impl Main {
 
     fn run_hook_script_for_job(&self, script: &String, job: &Job, pipeline_id: u64) -> Result<(), Error> {
         let shell = std::env::var("SHELL")?;
-        let mut command = std::process::Command::new(shell);
+        let mut command = Command::new(shell);
         command.arg("-c");
         command.arg(script);
 
@@ -2252,12 +2255,25 @@ impl Main {
         Ok(RunMode::Jobs(JobsMode { pipeline_id, manual_jobs: false }))
     }
 
+    fn webbrowser_open(&self, url: String) -> Result<(), Error> {
+        if let Some(url_program) = &self.config.hooks.open_url_program {
+            let mut process = Command::new(url_program)
+                .arg(url).spawn()?;
+            let _ = process.wait()?;
+        } else {
+            let _ = webbrowser::open(&url);
+        }
+
+        Ok(())
+    }
+
     fn on_job_open_in_browser(&self, job_id: u64) -> Result<(), Error> {
         let url = format!(
             "https://{}/{}/-/jobs/{}",
             &self.config.hostname, &self.config.project, job_id
         );
-        let _ = webbrowser::open(&url);
+        self.webbrowser_open(url)?;
+
         Ok(())
     }
 
@@ -2266,7 +2282,7 @@ impl Main {
             "https://{}/{}/pipelines/{}",
             &self.config.hostname, &self.config.project, pipeline_id
         );
-        let _ = webbrowser::open(&url);
+        self.webbrowser_open(url)?;
         Ok(())
     }
 
@@ -2557,7 +2573,7 @@ impl Main {
                     if let Some(selected) = self.selected_pipeline.selected() {
                         if selected < self.pipelines.len() {
                             let pipeline = &self.pipelines[selected];
-                            let mut command = std::process::Command::new("git");
+                            let mut command = Command::new("git");
                             command.arg("log");
                             command.arg(&pipeline.sha);
                             command.current_dir(&local_repo);

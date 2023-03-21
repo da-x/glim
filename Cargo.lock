@@ -690,6 +690,7 @@ dependencies = [
  "gitlab",
  "itertools",
  "masof",
+ "regex",
  "serde 1.0.152",
  "serde_json",
  "signal-hook 0.3.14",

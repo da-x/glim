@@ -55,6 +55,8 @@ pub enum Error {
     VarError(#[from] std::env::VarError),
     #[error("Config error: {0}")]
     ConfigError(#[from] config::ConfigError),
+    #[error("Regex error: {0}")]
+    RegexError(#[from] regex::Error),
     #[error("Crossterm error: {0}")]
     CrosstermError(#[from] crossterm::ErrorKind),
     #[error("Command error: {0}")]
@@ -241,7 +243,12 @@ enum CommandMode {
 #[derive(Debug, StructOpt, Clone)]
 enum WaitOptions {
     Pipeline {
+        /// Pipeline ID
         id: u64,
+
+        /// Jobs names matching this regex and failing, will regard 'running' status as 'failed'.
+        #[structopt(long)]
+        strict_jobs: Option<String>,
     }
 }
 
@@ -295,6 +302,13 @@ struct Config {
 impl Config {
     fn default_refresh() -> u64 {
         10
+    }
+
+    fn get_job_url(&self, job_id: u64) -> String {
+        format!(
+            "https://{}/{}/-/jobs/{}",
+            &self.hostname, &self.project, job_id
+        )
     }
 }
 
@@ -1079,7 +1093,13 @@ impl Main {
         let is_error;
 
         match opts {
-            WaitOptions::Pipeline { id } => {
+            WaitOptions::Pipeline { id, strict_jobs } => {
+                let strict_jobs = if let Some(strict_jobs) = strict_jobs {
+                    Some(regex::Regex::new(&strict_jobs)?)
+                } else {
+                    None
+                };
+
                 let mut endpoint = projects::pipelines::Pipeline::builder();
                 endpoint.project(config.project.clone());
                 endpoint.pipeline(id);
@@ -1113,6 +1133,29 @@ impl Main {
                         "success" | "failed" | "skipped" => {
                             is_error = str_status != "success";
                             break;
+                        }
+                        "running" => {
+                            let mut failed = Vec::new();
+                            if let Some(strict_jobs) = &strict_jobs {
+                                let jobs = Thread::get_jobs(id, &config, &client, JobDetailMode::WithoutManual).await?;
+                                for (name, job) in jobs.into_iter() {
+                                    if strict_jobs.is_match(&name) {
+                                        if job.status == "failed" {
+                                            failed.push((name, id));
+                                        }
+                                    }
+                                }
+                            };
+                            if failed.len() > 0 {
+                                is_error = true;
+                                eprintln!("");
+                                eprintln!("Considered failed earlier due to jobs:");
+                                eprintln!("");
+                                for (name, job_id) in failed {
+                                    eprintln!("  {}: {}", name, config.get_job_url(job_id));
+                                }
+                                break;
+                            }
                         }
                         _ => {
                         }
@@ -2268,11 +2311,7 @@ impl Main {
     }
 
     fn on_job_open_in_browser(&self, job_id: u64) -> Result<(), Error> {
-        let url = format!(
-            "https://{}/{}/-/jobs/{}",
-            &self.config.hostname, &self.config.project, job_id
-        );
-        self.webbrowser_open(url)?;
+        self.webbrowser_open(self.config.get_job_url(job_id))?;
 
         Ok(())
     }

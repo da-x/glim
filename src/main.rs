@@ -22,7 +22,7 @@ use std::{
     io::stdout,
     path::PathBuf,
     sync::Arc,
-    time::{Duration, Instant}, process::Command,
+    time::{Duration, Instant}, process::{Command},
 };
 use structopt::StructOpt;
 use thiserror::Error;
@@ -35,6 +35,7 @@ use tui::{
     Terminal,
 };
 use tokio::time::sleep;
+use std::io::Write;
 
 use masof::keyaction::KeyMap;
 
@@ -1002,10 +1003,7 @@ impl Main {
                         let from_jobs = from_jobs?;
                         let to_jobs = to_jobs?;
 
-                        use std::{
-                            fs::OpenOptions,
-                            io::{BufWriter, Write},
-                        };
+                        use std::{fs::OpenOptions, io::BufWriter };
 
                         let file = OpenOptions::new()
                             .create(true)
@@ -1505,15 +1503,28 @@ impl Main {
 
     async fn non_interactive_pipelines(&mut self) -> Result<bool, Error> {
         let state = self.state.lock().await;
+        let mut stdout = std::io::stdout();
 
         if let Some((_, pipelines)) = &state.pipelines.data {
             if self.opt.json_output {
                 for res in pipelines.iter() {
-                    println!("{}", serde_json::to_string(res)?);
+                    if let Err(e) = writeln!(stdout, "{}", serde_json::to_string(res)?) {
+                        if e.kind() != std::io::ErrorKind::BrokenPipe {
+                            eprintln!("{}", e);
+                            return Err(e.into());
+                        }
+                    }
                 }
             } else {
                 for res in pipelines.iter() {
-                    println!("{:9}  {:10} {}  {}", res.id, res.status, &res.sha[..12], res.web_url);
+                    if let Err(e) = writeln!(stdout, "{:9}  {:10} {}  {}",
+                        res.id, res.status, &res.sha[..12], res.web_url)
+                    {
+                        if e.kind() != std::io::ErrorKind::BrokenPipe {
+                            eprintln!("{}", e);
+                            return Err(e.into());
+                        }
+                    }
                 }
             }
             return Ok(true);

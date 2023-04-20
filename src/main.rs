@@ -250,6 +250,11 @@ enum WaitOptions {
         /// Jobs names matching this regex and failing, will regard 'running' status as 'failed'.
         #[structopt(long)]
         strict_jobs: Option<String>,
+
+        #[structopt(long)]
+        /// Write more information on what is running, and in markdown, so it can be pasted
+        /// somewhere.
+        markdown: bool,
     }
 }
 
@@ -309,6 +314,13 @@ impl Config {
         format!(
             "https://{}/{}/-/jobs/{}",
             &self.hostname, &self.project, job_id
+        )
+    }
+
+    fn get_pipeline_url(&self, pipeline_id: u64) -> String {
+        format!(
+            "https://{}/{}/pipelines/{}",
+            &self.hostname, &self.project, pipeline_id
         )
     }
 }
@@ -1091,7 +1103,7 @@ impl Main {
         let is_error;
 
         match opts {
-            WaitOptions::Pipeline { id, strict_jobs } => {
+            WaitOptions::Pipeline { id, strict_jobs, markdown } => {
                 let strict_jobs = if let Some(strict_jobs) = strict_jobs {
                     Some(regex::Regex::new(&strict_jobs)?)
                 } else {
@@ -1124,8 +1136,13 @@ impl Main {
 
                     let new_state = Some(pipeline_details.status.clone());
                     let str_status = pipeline_details.status.as_str();
+
                     if new_state != prev_state {
-                        println!("Pipeline {} status: {}", id, pipeline_details.status);
+                        if markdown {
+                            println!("Pipeline [{}]({}) status: {}", id, config.get_pipeline_url(id), pipeline_details.status);
+                        } else {
+                            println!("Pipeline {} status: {}", id, pipeline_details.status);
+                        }
                     }
                     match str_status {
                         "success" | "failed" | "skipped" => {

@@ -10,9 +10,9 @@ use crossterm::{
 use futures_timer::Delay;
 use gitlab::{
     api::{
-        projects,
-        projects::{jobs::JobScope, pipelines::PipelineOrderBy},
-        users, AsyncQuery,
+        projects::{self, merge_requests::MergeRequestState},
+        projects::{jobs::JobScope, pipelines::PipelineOrderBy, merge_requests::MergeRequests},
+        users, AsyncQuery, common::SortOrder,
     },
     AsyncGitlab, GitlabBuilder,
 };
@@ -317,6 +317,13 @@ impl Config {
         )
     }
 
+    fn get_merge_request_url(&self, job_id: u64) -> String {
+        format!(
+            "https://{}/{}/-/merge_requests/{}",
+            &self.hostname, &self.project, job_id
+        )
+    }
+
     fn get_pipeline_url(&self, pipeline_id: u64) -> String {
         format!(
             "https://{}/{}/pipelines/{}",
@@ -413,6 +420,7 @@ impl Job {
 struct PipelineDetails {
     user: User,
     status: String,
+    r#ref: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -1117,6 +1125,7 @@ impl Main {
                     .map_err(Error::BuilderError)?;
 
                 let mut prev_state = None;
+                let mut mr_info = None;
 
                 loop {
                     let rsp: Result<_, _> = endpoint
@@ -1134,12 +1143,44 @@ impl Main {
                     let pipeline_details: PipelineDetails = rsp
                         .map_err(|x| Error::BoxError(Box::new(x)))?;
 
+                    if mr_info.is_none() {
+                        if let Some(r) = pipeline_details.r#ref {
+                            let endpoint = MergeRequests::builder()
+                                .project(config.project.clone())
+                                .source_branch(r.clone())
+                                .state(MergeRequestState::Opened)
+                                .sort(SortOrder::Descending)
+                                .build()
+                                .map_err(Error::BuilderError)?;
+                            #[derive(Deserialize, Debug)]
+                            struct MergeRequestResult {
+                                iid: u64,
+                                target_branch: String,
+                            }
+                            let mrs: Vec<MergeRequestResult> = endpoint
+                                .query_async(client)
+                                .await
+                                .map_err(|x| Error::BoxError(Box::new(x)))?;
+                            if let Some(first) = mrs.first() {
+                                mr_info = Some((first.iid, r, first.target_branch.clone()));
+                            }
+                        }
+                    }
+
                     let new_state = Some(pipeline_details.status.clone());
                     let str_status = pipeline_details.status.as_str();
 
                     if new_state != prev_state {
                         if markdown {
-                            println!("Pipeline [{}]({}) status: {}", id, config.get_pipeline_url(id), pipeline_details.status);
+                            let mr_url = if let Some((mr_id, r#ref, target)) = &mr_info {
+                                format!(", MR [{}]({}) (`{}` → `{}`)", mr_id,
+                                    config.get_merge_request_url(*mr_id),
+                                    r#ref,
+                                    target)
+                            } else {
+                                format!("")
+                            };
+                            println!("Pipeline [{}]({}){} status: {}", id, config.get_pipeline_url(id), mr_url, pipeline_details.status);
                         } else {
                             println!("Pipeline {} status: {}", id, pipeline_details.status);
                         }

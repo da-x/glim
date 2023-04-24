@@ -232,6 +232,10 @@ enum CommandMode {
     #[structopt(name = "wait")]
     Wait(WaitOptions),
 
+    /// List merge requests by criteria
+    #[structopt(name = "merge-requests")]
+    MergeRequests(MergeRequestsOptions),
+
     /// Interface for a git aliases that are sensitive to Git's state
     #[structopt(name = "from-alias")]
     FromAlias(AliasCommands),
@@ -239,6 +243,14 @@ enum CommandMode {
     /// Generate some non-interactive reports in JSON output
     #[structopt(name = "report")]
     FromReport(ReportCommands),
+}
+
+#[derive(Debug, StructOpt, Clone)]
+enum MergeRequestsOptions {
+    ByPipelineId {
+        #[structopt(long)]
+        pipeline_id: u64,
+    },
 }
 
 #[derive(Debug, StructOpt, Clone)]
@@ -1050,6 +1062,11 @@ impl Main {
 
                 return Ok(RunMode::None);
             }
+            CommandMode::MergeRequests(opts) => {
+                let _ = Self::handle_merge_requests(opts, config, client).await?;
+
+                return Ok(RunMode::None);
+            },
         };
 
         match alias {
@@ -1103,6 +1120,39 @@ impl Main {
         }
     }
 
+    async fn handle_merge_requests(
+        opts: MergeRequestsOptions,
+        config: &Config,
+        client: &AsyncGitlab,
+    ) -> Result<(), Error> {
+        match opts {
+            MergeRequestsOptions::ByPipelineId{pipeline_id} => {
+                let mut endpoint = projects::pipelines::Pipeline::builder();
+                endpoint.project(config.project.clone());
+                endpoint.pipeline(pipeline_id);
+                let endpoint = endpoint.build()
+                    .map_err(Error::BuilderError)?;
+                let rsp: Result<_, _> = endpoint
+                    .query_async(client)
+                    .await;
+
+                let pipeline_details: PipelineDetails = rsp
+                    .map_err(|x| Error::BoxError(Box::new(x)))?;
+
+                if let Some(r) = pipeline_details.r#ref {
+                    for rs in get_merge_requests_by_pipeline(config, &r, client).await? {
+                        println!("{} -> {}   {}",
+                            r,
+                            rs.target_branch,
+                            config.get_merge_request_url(rs.iid));
+                    }
+                }
+            },
+        }
+
+        Ok(())
+    }
+
     async fn handle_wait(
         opts: WaitOptions,
         config: &Config,
@@ -1145,22 +1195,7 @@ impl Main {
 
                     if mr_info.is_none() {
                         if let Some(r) = pipeline_details.r#ref {
-                            let endpoint = MergeRequests::builder()
-                                .project(config.project.clone())
-                                .source_branch(r.clone())
-                                .state(MergeRequestState::Opened)
-                                .sort(SortOrder::Descending)
-                                .build()
-                                .map_err(Error::BuilderError)?;
-                            #[derive(Deserialize, Debug)]
-                            struct MergeRequestResult {
-                                iid: u64,
-                                target_branch: String,
-                            }
-                            let mrs: Vec<MergeRequestResult> = endpoint
-                                .query_async(client)
-                                .await
-                                .map_err(|x| Error::BoxError(Box::new(x)))?;
+                            let mrs = get_merge_requests_by_pipeline(config, &r, client).await?;
                             if let Some(first) = mrs.first() {
                                 mr_info = Some((first.iid, r, first.target_branch.clone()));
                             }
@@ -2802,6 +2837,27 @@ impl Main {
         self.terminal.as_mut().unwrap().show_cursor()?;
         Ok(())
     }
+}
+
+#[derive(Deserialize, Debug)]
+struct MergeRequestResult {
+    iid: u64,
+    target_branch: String,
+}
+
+async fn get_merge_requests_by_pipeline(config: &Config, r: &String, client: &AsyncGitlab) -> Result<Vec<MergeRequestResult>, Error> {
+    let endpoint = MergeRequests::builder()
+        .project(config.project.clone())
+        .source_branch(r.clone())
+        .state(MergeRequestState::Opened)
+        .sort(SortOrder::Descending)
+        .build()
+        .map_err(Error::BuilderError)?;
+
+    Ok(endpoint
+        .query_async(client)
+        .await
+        .map_err(|x| Error::BoxError(Box::new(x)))?)
 }
 
 fn main_wrap() -> Result<(), Error> {

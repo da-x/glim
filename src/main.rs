@@ -1223,6 +1223,21 @@ impl Main {
                     match str_status {
                         "success" | "failed" | "skipped" => {
                             is_error = str_status != "success";
+                            if markdown && str_status == "failed" {
+                                let jobs = Thread::get_jobs(id, &config, &client, JobDetailMode::WithoutManual).await?;
+                                print!("In jobs: ");
+                                let mut idx = 0;
+                                for (name, job) in jobs.into_iter() {
+                                    if job.status == "failed" {
+                                        if idx > 0 {
+                                            print!(", ");
+                                        }
+                                        idx += 1;
+                                        print!("[{}]({})", name, config.get_job_url(job.id));
+                                    }
+                                }
+                                println!("");
+                            };
                             break;
                         }
                         "running" => {

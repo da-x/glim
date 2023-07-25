@@ -51,7 +51,10 @@ tail-program() {
 
     printf '\033]2;%s\033\\' "${GLCIM_PROJECT} - ${GLCIM_PIPELINE_ID} - job ${GLCIM_JOB_ID} - ${GLCIM_JOB_NAME}"
 
+    old_umask=$(umask)
     mkdir -p ${dir}
+    umask $old_umask
+
     touch ${outfile}
 
     if [[ "$1" == "-d" ]] ; then

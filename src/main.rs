@@ -2572,9 +2572,14 @@ impl Main {
             RunMode::Modal { .. } => {}
             RunMode::None => {}
             RunMode::Help => {}
-            RunMode::Jobs(info) => {
-                let pipeline_id = info.pipeline_id;
-                self.seek_request(Request::CancelPipeline(pipeline_id));
+            RunMode::Jobs(_) => {
+                if let Some(selected) = self.selected_job.selected() {
+                    if selected < self.jobs.len() {
+                        let job_info = &self.jobs[selected];
+                        let pipeline_id = job_info.pipeline.id;
+                        self.seek_request(Request::CancelPipeline(pipeline_id));
+                    }
+                }
             }
             RunMode::PipeDiff(_) => {}
             RunMode::Pipelines(_) => {

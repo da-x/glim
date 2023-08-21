@@ -140,6 +140,7 @@ enum Request {
     CancelPipeline(u64),
     PlayJob(u64),
     RetryJob(u64),
+    CancelJob(u64),
     RetryPipeline(u64),
 }
 
@@ -830,6 +831,18 @@ impl Thread {
                         state.jobs.update = true;
                         (rsp, "Job retry")
                     }
+                    Request::CancelJob(job_id) => {
+                        let endpoint = projects::jobs::CancelJob::builder()
+                            .project(self.config.project.clone())
+                            .job(job_id)
+                            .build()
+                            .map_err(Error::BuilderError)?;
+                        let rsp: Result<_, _> =
+                            gitlab::api::raw(endpoint).query_async(&self.gitlab).await;
+                        let mut state = self.state.lock().await;
+                        state.jobs.update = true;
+                        (rsp, "Job retry")
+                    }
                     Request::PlayJob(job_id) => {
                         let endpoint = projects::jobs::PlayJob::builder()
                             .project(self.config.project.clone())
@@ -902,6 +915,7 @@ enum Action {
     CancelPipeline,
     Retry,
     PlayJob,
+    CancelJob,
     ConfirmAction,
 }
 
@@ -940,6 +954,7 @@ impl std::fmt::Display for Action {
             }
             Action::DeletePipeline => "Delete the current pipeline",
             Action::CancelPipeline => "Cancel the current pipeline",
+            Action::CancelJob => "Cancel the current job",
             Action::Retry => "Retry the current job",
             Action::PlayJob => "Play the current manual job",
             Action::ConfirmAction => "When presented request for confirmation, confirm action",
@@ -1453,6 +1468,8 @@ impl Main {
             .add_ctrl(KeyCode::Char('x'), Action::DeletePipeline);
         self.key_map
             .add_shift(KeyCode::Char('c'), Action::CancelPipeline);
+        self.key_map
+            .add_shift(KeyCode::Char('x'), Action::CancelJob);
         self.key_map
             .add_ctrl(KeyCode::Char('r'), Action::Retry);
 
@@ -2001,6 +2018,15 @@ impl Main {
                 Request::RetryJob(job_id) => {
                     vec![
                         Span::raw("Retry of Job "),
+                        Span::styled(
+                            format!("{}", job_id),
+                            Style::default().fg(Color::LightBlue),
+                        ),
+                    ]
+                }
+                Request::CancelJob(job_id) => {
+                    vec![
+                        Span::raw("Cancel of Job "),
                         Span::styled(
                             format!("{}", job_id),
                             Style::default().fg(Color::LightBlue),
@@ -2567,6 +2593,27 @@ impl Main {
         Ok(())
     }
 
+    fn cancel_job(&mut self) -> Result<(), Error> {
+        match &mut self.mode {
+            RunMode::Modal { .. } => {}
+            RunMode::None => {}
+            RunMode::Help => {}
+            RunMode::Jobs(_) => {
+                if let Some(selected) = self.selected_job.selected() {
+                    if selected < self.jobs.len() {
+                        let job_info = &self.jobs[selected];
+                        let req = Request::CancelJob(job_info.id);
+                        self.seek_request(req);
+                    }
+                }
+            }
+            RunMode::PipeDiff(_) => {}
+            RunMode::Pipelines(_) => {}
+        }
+
+        Ok(())
+    }
+
     fn cancel_pipeline(&mut self) -> Result<(), Error> {
         match &mut self.mode {
             RunMode::Modal { .. } => {}
@@ -2832,6 +2879,7 @@ impl Main {
                     Action::CancelPipeline => self.cancel_pipeline()?,
                     Action::Retry => self.retry()?,
                     Action::PlayJob => self.play()?,
+                    Action::CancelJob => self.cancel_job()?,
                     Action::ConfirmAction => self.confirm_action().await?,
                 }
             }

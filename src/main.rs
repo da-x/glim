@@ -92,7 +92,11 @@ struct PipelinesMode {
     #[structopt(long = "nr-pipelines", short = "n", default_value = "200")]
     nr_pipelines: usize,
 
-    /// Avoid resolving usernames when showing pipelines of all users (slow!)
+    /// Resolve job counts when showing pipelines (slow!)
+    #[structopt(long = "resolve-job-counts", short = "J")]
+    resolve_job_counts: bool,
+
+    /// Resolve usernames when showing pipelines of all users (slow!)
     #[structopt(long = "usernames-resolve")]
     resolve_usernames: bool,
 
@@ -527,6 +531,13 @@ impl<T> Updatable<Vec<T>> {
 
 type JobDiff = itertools::EitherOrBoth<(String, Job), (String, Job)>;
 
+struct Counts {
+    failed: u64,
+    running: u64,
+    success: u64,
+    total: u64,
+}
+
 #[derive(Default)]
 struct State {
     request_count: u64,
@@ -536,6 +547,7 @@ struct State {
     request_queue: VecDeque<Request>,
     response: Option<(Instant, String)>,
     pipeline_trigger: std::collections::HashMap<u64, String>,
+    pipeline_job_counts: std::collections::HashMap<u64, Counts>,
 }
 
 enum RxCmd {
@@ -547,6 +559,7 @@ struct Thread {
     gitlab: AsyncGitlab,
     rx_cmd: mpsc::Receiver<RxCmd>,
     pipeline_without_trigger: VecDeque<u64>,
+    pipeline_without_job_counts: VecDeque<u64>,
     state: Arc<Mutex<State>>,
     rsp_sender: channel::mpsc::Sender<()>,
     current_user: User,
@@ -653,6 +666,44 @@ impl Thread {
                                 .map_err(|x| Error::BoxError(Box::new(x)))?;
                             let mut state = self.state.lock().await;
                             state.pipeline_trigger.insert(id, pipeline.user.username);
+                            state.request_count += 1;
+                            updates += 1;
+                        }
+                    }
+                    if info.resolve_job_counts {
+                        if let Some(id) = self.pipeline_without_job_counts.pop_back() {
+                            let mut failed = 0;
+                            let mut running = 0;
+                            let mut success = 0;
+                            let total;
+
+                            let jobs: Vec<_> = Self::get_jobs(id, &self.config, &self.gitlab, JobDetailMode::WithoutManual)
+                                .await?
+                                .values()
+                                .into_iter()
+                                .map(|x| x.clone())
+                                .collect();
+
+                            total = jobs.len() as u64;
+                            for job in jobs.into_iter() {
+                                if job.status == "failed" {
+                                    failed += 1;
+                                }
+                                if job.status == "running" {
+                                    running += 1;
+                                }
+                                if job.status == "success" {
+                                    success += 1;
+                                }
+                            }
+
+                            let mut state = self.state.lock().await;
+                            state.pipeline_job_counts.insert(id, Counts {
+                                failed,
+                                running,
+                                success,
+                                total,
+                            });
                             state.request_count += 1;
                             updates += 1;
                         }
@@ -772,6 +823,9 @@ impl Thread {
                         for pipeline in pipelines.iter() {
                             if state.pipeline_trigger.get(&pipeline.id).is_none() {
                                 self.pipeline_without_trigger.push_front(pipeline.id);
+                            }
+                            if state.pipeline_job_counts.get(&pipeline.id).is_none() {
+                                self.pipeline_without_job_counts.push_front(pipeline.id);
                             }
                         }
 
@@ -909,6 +963,7 @@ enum Action {
     OpenPreviousInBrowser,
     GitLog,
     ToggleUsernameResolve,
+    ToggleJobSummaries,
     ToggleAllRefs,
     ToggleManualJobs,
     DeletePipeline,
@@ -945,6 +1000,9 @@ impl std::fmt::Display for Action {
             Action::GitLog => "Open git commit",
             Action::ToggleUsernameResolve => {
                 "Toggle username load when listing other users pipelines"
+            }
+            Action::ToggleJobSummaries => {
+                "Toggle job summaries in pipeline view"
             }
             Action::ToggleAllRefs => {
                 "In Pipelines mode, toggle between all refs or just the requested ref"
@@ -1104,6 +1162,7 @@ impl Main {
                         all_users: true,
                         nr_pipelines,
                         resolve_usernames: true,
+                        resolve_job_counts: false,
                         r#ref: None,
                         custom_username: None,
                         commithash: info.specific_commithash.clone(),
@@ -1116,6 +1175,7 @@ impl Main {
                             all_users: false,
                             nr_pipelines,
                             resolve_usernames: false,
+                            resolve_job_counts: false,
                             r#ref: branch,
                             custom_username: info.custom_username.clone(),
                             commithash: info.specific_commithash.clone(),
@@ -1127,6 +1187,7 @@ impl Main {
                     all_users: false,
                     nr_pipelines,
                     resolve_usernames: false,
+                    resolve_job_counts: false,
                     r#ref: None,
                     custom_username: info.custom_username.clone(),
                     commithash: info.specific_commithash.clone(),
@@ -1356,6 +1417,7 @@ impl Main {
                 config: config2,
                 gitlab: client,
                 pipeline_without_trigger: VecDeque::new(),
+                pipeline_without_job_counts: VecDeque::new(),
                 state: state2,
                 rx_cmd: rx,
                 rsp_sender,
@@ -1455,6 +1517,8 @@ impl Main {
         self.key_map.add_no_mods(KeyCode::Char('l'), Action::GitLog);
         self.key_map
             .add_no_mods(KeyCode::Char('u'), Action::ToggleUsernameResolve);
+        self.key_map
+            .add_no_mods(KeyCode::Char('j'), Action::ToggleJobSummaries);
         self.key_map
             .add_no_mods(KeyCode::Char('y'), Action::ConfirmAction);
         self.key_map
@@ -1720,6 +1784,13 @@ impl Main {
 
             widths.extend(vec![
                 Constraint::Length(10),
+            ]);
+
+            if info.resolve_job_counts {
+                widths.push(Constraint::Length(12));
+            };
+
+            widths.extend(vec![
                 Constraint::Length(max_ref_len as u16),
                 Constraint::Length(12),
                 Constraint::Length(19),
@@ -1772,10 +1843,62 @@ impl Main {
 
                     v.extend(vec![
                         Cell::from(status),
+                    ]);
+
+                    if info.resolve_job_counts {
+                        let cell = if let Some(counts) = state.pipeline_job_counts.get(&pipeline.id) {
+                            let sep = Span::styled(
+                                format!("+"),
+                                Style::default().fg(Color::White)
+                            );
+                            let div = Span::styled(
+                                format!("/"),
+                                Style::default().fg(Color::White)
+                            );
+                            let total = Span::styled(
+                                format!("{}", counts.total),
+                                Style::default().fg(Color::White)
+                            );
+                            let mut spans = vec![];
+                            if counts.failed != 0 {
+                                spans.push(Span::styled(
+                                    format!("{}", counts.failed),
+                                    Style::default().fg(Color::Red)
+                                ))
+                            }
+                            if counts.running != 0 {
+                                if spans.len() != 0 {
+                                    spans.push(sep.clone());
+                                }
+                                spans.push(Span::styled(
+                                    format!("{}", counts.running),
+                                    Style::default().fg(Color::Cyan)
+                                ))
+                            }
+                            if counts.success != 0 {
+                                if spans.len() != 0 {
+                                    spans.push(sep.clone());
+                                }
+                                spans.push(Span::styled(
+                                    format!("{}", counts.success),
+                                    Style::default().fg(Color::Green)
+                                ))
+                            }
+                            spans.extend(vec![div, total]);
+                            Cell::from(tui::text::Spans::from(spans))
+                        } else {
+                            Cell::from(Span::raw("..."))
+                        };
+
+                        v.extend(vec![cell]);
+                    }
+
+                    v.extend(vec![
                         Cell::from(Span::raw(pipeline.r#ref.to_string())),
                         Cell::from(Span::raw(pipeline.sha.to_string())),
                         Cell::from(Span::raw(pipeline.created_at.to_string())),
                     ]);
+
 
                     items.push(Row::new(v));
                 }
@@ -1813,6 +1936,20 @@ impl Main {
                                 "Status",
                                 Style::default().add_modifier(Modifier::BOLD),
                             )),
+                        ]
+                        .iter()
+                        .cloned(),
+                    );
+
+                    if info.resolve_job_counts {
+                        v.push(Cell::from(Span::styled(
+                            "Jobs",
+                            Style::default().add_modifier(Modifier::BOLD),
+                        )));
+                    }
+
+                    v.extend(
+                        [
                             Cell::from(Span::styled(
                                 "Ref",
                                 Style::default().add_modifier(Modifier::BOLD),
@@ -2524,6 +2661,22 @@ impl Main {
         Ok(())
     }
 
+    fn toggle_job_summaries(&mut self) -> Result<(), Error> {
+        match &mut self.mode {
+            RunMode::None => {}
+            RunMode::Modal { .. } => {}
+            RunMode::Help => {}
+            RunMode::Jobs(_) => {}
+            RunMode::PipeDiff(_) => {}
+            RunMode::Pipelines(info) => {
+                info.resolve_job_counts = !info.resolve_job_counts;
+                let _ = self.tx_cmd.try_send(RxCmd::UpdateMode(self.mode.clone()));
+            }
+        }
+
+        Ok(())
+    }
+
     async fn toggle_manual_jobs(&mut self) -> Result<(), Error> {
         match &mut self.mode {
             RunMode::None => {}
@@ -2873,6 +3026,7 @@ impl Main {
                     Action::OpenPreviousInBrowser => self.open_previous()?,
                     Action::GitLog => self.open_git_log()?,
                     Action::ToggleUsernameResolve => self.toggle_username_resolve()?,
+                    Action::ToggleJobSummaries => self.toggle_job_summaries()?,
                     Action::ToggleManualJobs => self.toggle_manual_jobs().await?,
                     Action::ToggleAllRefs => self.toggle_all_refs().await?,
                     Action::DeletePipeline => self.delete_pipeline()?,

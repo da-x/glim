@@ -657,6 +657,8 @@ impl Thread {
     async fn run(&mut self) -> Result<(), Error> {
         loop {
             let mut updates: usize = 0;
+            let mut next_delay_ms = 1000;
+
             match &self.mode {
                 RunMode::None => {
                     return Ok(());
@@ -699,6 +701,8 @@ impl Thread {
                                 .map(|x| x.clone())
                                 .collect();
 
+                            next_delay_ms = 300;
+
                             total = jobs.len() as u64;
                             for job in jobs.into_iter() {
                                 if job.status == "failed" {
@@ -729,7 +733,7 @@ impl Thread {
                 let _ = self.rsp_sender.try_send(());
             }
 
-            let delay = Delay::new(Duration::from_millis(1000));
+            let delay = Delay::new(Duration::from_millis(next_delay_ms));
             select! {
                 _ = delay.fuse() => {
                     continue;
@@ -2711,7 +2715,12 @@ impl Main {
             RunMode::Help => {}
             RunMode::Jobs(_) => {}
             RunMode::PipeDiff(_) => {}
-            RunMode::Pipelines(_) => {
+            RunMode::Pipelines(info) => {
+                if !info.resolve_job_counts {
+                    info.resolve_job_counts = true;
+                    let _ = self.tx_cmd.try_send(RxCmd::UpdateMode(self.mode.clone()));
+                }
+
                 if let Some(selected) = self.selected_pipeline.selected() {
                     if selected < self.pipelines.len() {
                         let pipeline = &self.pipelines[selected];

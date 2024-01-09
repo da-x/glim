@@ -452,6 +452,20 @@ struct Updatable<T> {
 }
 
 impl<T> Updatable<T> {
+    fn new(t: T) -> Self {
+        Self {
+            update: true,
+            data: Some((Instant::now(), t))
+        }
+    }
+
+    fn ref_get(&self) -> Option<&T> {
+        match &self.data {
+            Some((_, t)) => Some(&t),
+            None => None,
+        }
+    }
+
     fn check_expiry(&mut self, dur: std::time::Duration) -> bool {
         let update = self.update;
 
@@ -531,6 +545,7 @@ impl<T> Updatable<Vec<T>> {
 
 type JobDiff = itertools::EitherOrBoth<(String, Job), (String, Job)>;
 
+#[derive(Default)]
 struct Counts {
     failed: u64,
     running: u64,
@@ -547,7 +562,7 @@ struct State {
     request_queue: VecDeque<Request>,
     response: Option<(Instant, String)>,
     pipeline_trigger: std::collections::HashMap<u64, String>,
-    pipeline_job_counts: std::collections::HashMap<u64, Counts>,
+    pipeline_job_counts: std::collections::HashMap<u64, Updatable<Counts>>,
 }
 
 enum RxCmd {
@@ -559,7 +574,7 @@ struct Thread {
     gitlab: AsyncGitlab,
     rx_cmd: mpsc::Receiver<RxCmd>,
     pipeline_without_trigger: VecDeque<u64>,
-    pipeline_without_job_counts: VecDeque<u64>,
+    pipeline_to_refresh_job_counts: VecDeque<u64>,
     state: Arc<Mutex<State>>,
     rsp_sender: channel::mpsc::Sender<()>,
     current_user: User,
@@ -671,7 +686,7 @@ impl Thread {
                         }
                     }
                     if info.resolve_job_counts {
-                        if let Some(id) = self.pipeline_without_job_counts.pop_back() {
+                        if let Some(id) = self.pipeline_to_refresh_job_counts.pop_back() {
                             let mut failed = 0;
                             let mut running = 0;
                             let mut success = 0;
@@ -698,12 +713,12 @@ impl Thread {
                             }
 
                             let mut state = self.state.lock().await;
-                            state.pipeline_job_counts.insert(id, Counts {
+                            state.pipeline_job_counts.insert(id, Updatable::new(Counts {
                                 failed,
                                 running,
                                 success,
                                 total,
-                            });
+                            }));
                             state.request_count += 1;
                             updates += 1;
                         }
@@ -824,8 +839,10 @@ impl Thread {
                             if state.pipeline_trigger.get(&pipeline.id).is_none() {
                                 self.pipeline_without_trigger.push_front(pipeline.id);
                             }
-                            if state.pipeline_job_counts.get(&pipeline.id).is_none() {
-                                self.pipeline_without_job_counts.push_front(pipeline.id);
+                            if let Some(job_counts) = state.pipeline_job_counts.get_mut(&pipeline.id) {
+                                if job_counts.check_expiry(Duration::from_secs(30)) {
+                                    self.pipeline_to_refresh_job_counts.push_front(pipeline.id);
+                                }
                             }
                         }
 
@@ -964,6 +981,7 @@ enum Action {
     GitLog,
     ToggleUsernameResolve,
     ToggleJobSummaries,
+    TriggerJobSummaries,
     ToggleAllRefs,
     ToggleManualJobs,
     DeletePipeline,
@@ -1003,6 +1021,9 @@ impl std::fmt::Display for Action {
             }
             Action::ToggleJobSummaries => {
                 "Toggle job summaries in pipeline view"
+            }
+            Action::TriggerJobSummaries => {
+                "Eanble job summary for a pipeline in pipeline view"
             }
             Action::ToggleAllRefs => {
                 "In Pipelines mode, toggle between all refs or just the requested ref"
@@ -1417,7 +1438,7 @@ impl Main {
                 config: config2,
                 gitlab: client,
                 pipeline_without_trigger: VecDeque::new(),
-                pipeline_without_job_counts: VecDeque::new(),
+                pipeline_to_refresh_job_counts: VecDeque::new(),
                 state: state2,
                 rx_cmd: rx,
                 rsp_sender,
@@ -1518,7 +1539,9 @@ impl Main {
         self.key_map
             .add_no_mods(KeyCode::Char('u'), Action::ToggleUsernameResolve);
         self.key_map
-            .add_no_mods(KeyCode::Char('j'), Action::ToggleJobSummaries);
+            .add_shift(KeyCode::Char('j'), Action::ToggleJobSummaries);
+        self.key_map
+            .add_no_mods(KeyCode::Char('j'), Action::TriggerJobSummaries);
         self.key_map
             .add_no_mods(KeyCode::Char('y'), Action::ConfirmAction);
         self.key_map
@@ -1847,45 +1870,49 @@ impl Main {
 
                     if info.resolve_job_counts {
                         let cell = if let Some(counts) = state.pipeline_job_counts.get(&pipeline.id) {
-                            let sep = Span::styled(
-                                format!("+"),
-                                Style::default().fg(Color::White)
-                            );
-                            let div = Span::styled(
-                                format!("/"),
-                                Style::default().fg(Color::White)
-                            );
-                            let total = Span::styled(
-                                format!("{}", counts.total),
-                                Style::default().fg(Color::White)
-                            );
-                            let mut spans = vec![];
-                            if counts.failed != 0 {
-                                spans.push(Span::styled(
-                                    format!("{}", counts.failed),
-                                    Style::default().fg(Color::Red)
-                                ))
-                            }
-                            if counts.running != 0 {
-                                if spans.len() != 0 {
-                                    spans.push(sep.clone());
+                            if let Some(counts) = counts.ref_get() {
+                                let sep = Span::styled(
+                                    format!("+"),
+                                    Style::default().fg(Color::White)
+                                );
+                                let div = Span::styled(
+                                    format!("/"),
+                                    Style::default().fg(Color::White)
+                                );
+                                let total = Span::styled(
+                                    format!("{}", counts.total),
+                                    Style::default().fg(Color::White)
+                                );
+                                let mut spans = vec![];
+                                if counts.failed != 0 {
+                                    spans.push(Span::styled(
+                                        format!("{}", counts.failed),
+                                        Style::default().fg(Color::Red)
+                                    ))
                                 }
-                                spans.push(Span::styled(
-                                    format!("{}", counts.running),
-                                    Style::default().fg(Color::Cyan)
-                                ))
-                            }
-                            if counts.success != 0 {
-                                if spans.len() != 0 {
-                                    spans.push(sep.clone());
+                                if counts.running != 0 {
+                                    if spans.len() != 0 {
+                                        spans.push(sep.clone());
+                                    }
+                                    spans.push(Span::styled(
+                                        format!("{}", counts.running),
+                                        Style::default().fg(Color::Cyan)
+                                    ))
                                 }
-                                spans.push(Span::styled(
-                                    format!("{}", counts.success),
-                                    Style::default().fg(Color::Green)
-                                ))
+                                if counts.success != 0 {
+                                    if spans.len() != 0 {
+                                        spans.push(sep.clone());
+                                    }
+                                    spans.push(Span::styled(
+                                        format!("{}", counts.success),
+                                        Style::default().fg(Color::Green)
+                                    ))
+                                }
+                                spans.extend(vec![div, total]);
+                                Cell::from(tui::text::Spans::from(spans))
+                            } else {
+                                Cell::from(Span::raw("<loading>"))
                             }
-                            spans.extend(vec![div, total]);
-                            Cell::from(tui::text::Spans::from(spans))
                         } else {
                             Cell::from(Span::raw("..."))
                         };
@@ -2677,6 +2704,27 @@ impl Main {
         Ok(())
     }
 
+    async fn trigger_job_summaries(&mut self) -> Result<(), Error> {
+        match &mut self.mode {
+            RunMode::None => {}
+            RunMode::Modal { .. } => {}
+            RunMode::Help => {}
+            RunMode::Jobs(_) => {}
+            RunMode::PipeDiff(_) => {}
+            RunMode::Pipelines(_) => {
+                if let Some(selected) = self.selected_pipeline.selected() {
+                    if selected < self.pipelines.len() {
+                        let pipeline = &self.pipelines[selected];
+                        let mut state = self.state.lock().await;
+                        state.pipeline_job_counts.insert(pipeline.id, Default::default());
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     async fn toggle_manual_jobs(&mut self) -> Result<(), Error> {
         match &mut self.mode {
             RunMode::None => {}
@@ -3027,6 +3075,7 @@ impl Main {
                     Action::GitLog => self.open_git_log()?,
                     Action::ToggleUsernameResolve => self.toggle_username_resolve()?,
                     Action::ToggleJobSummaries => self.toggle_job_summaries()?,
+                    Action::TriggerJobSummaries => self.trigger_job_summaries().await?,
                     Action::ToggleManualJobs => self.toggle_manual_jobs().await?,
                     Action::ToggleAllRefs => self.toggle_all_refs().await?,
                     Action::DeletePipeline => self.delete_pipeline()?,

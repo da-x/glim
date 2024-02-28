@@ -272,6 +272,10 @@ enum WaitOptions {
         /// Write more information on what is running, and in markdown, so it can be pasted
         /// somewhere.
         markdown: bool,
+
+        #[structopt(long)]
+        /// Exit when it the pipeline is starting to run
+        exit_on_running: bool,
     }
 }
 
@@ -1262,7 +1266,7 @@ impl Main {
         let is_error;
 
         match opts {
-            WaitOptions::Pipeline { id, strict_jobs, markdown } => {
+            WaitOptions::Pipeline { id, strict_jobs, markdown, exit_on_running } => {
                 let strict_jobs = if let Some(strict_jobs) = strict_jobs {
                     Some(regex::Regex::new(&strict_jobs)?)
                 } else {
@@ -1361,6 +1365,10 @@ impl Main {
                                 for (name, job_id) in failed {
                                     eprintln!("  {}: {}", name, config.get_job_url(job_id));
                                 }
+                                break;
+                            }
+                            if exit_on_running {
+                                is_error = false;
                                 break;
                             }
                         }

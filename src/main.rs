@@ -415,6 +415,9 @@ struct Job {
     name: String,
     status: String,
     pipeline: Pipeline,
+
+    #[serde(default)]
+    allow_failure: bool,
 }
 
 use tui::{
@@ -422,12 +425,18 @@ use tui::{
     text::Span,
 };
 
+static CHECK_FAILURE: Color = Color::Rgb(255, 150, 0);
+
 impl Job {
     fn styled_status(&self) -> Span {
         Span::styled(
             &self.status,
             Style::default().fg(match self.status.as_str() {
-                "failed" => Color::Red,
+                "failed" => if self.allow_failure {
+                    CHECK_FAILURE
+                } else {
+                    Color::Red
+                },
                 "running" => Color::Cyan,
                 "success" => Color::Green,
                 "canceled" => Color::Gray,
@@ -552,6 +561,7 @@ type JobDiff = itertools::EitherOrBoth<(String, Job), (String, Job)>;
 #[derive(Default)]
 struct Counts {
     failed: u64,
+    check: u64,
     running: u64,
     success: u64,
     total: u64,
@@ -694,6 +704,7 @@ impl Thread {
                     if info.resolve_job_counts {
                         if let Some(id) = self.pipeline_to_refresh_job_counts.pop_back() {
                             let mut failed = 0;
+                            let mut check = 0;
                             let mut running = 0;
                             let mut success = 0;
                             let total;
@@ -710,7 +721,11 @@ impl Thread {
                             total = jobs.len() as u64;
                             for job in jobs.into_iter() {
                                 if job.status == "failed" {
-                                    failed += 1;
+                                    if job.allow_failure {
+                                        check += 1;
+                                    } else {
+                                        failed += 1;
+                                    }
                                 }
                                 if job.status == "running" {
                                     running += 1;
@@ -726,6 +741,7 @@ impl Thread {
                                 running,
                                 success,
                                 total,
+                                check,
                             }));
                             state.request_count += 1;
                             updates += 1;
@@ -1333,7 +1349,7 @@ impl Main {
                                 print!("In jobs: ");
                                 let mut idx = 0;
                                 for (name, job) in jobs.into_iter() {
-                                    if job.status == "failed" {
+                                    if job.status == "failed" && !job.allow_failure {
                                         if idx > 0 {
                                             print!(", ");
                                         }
@@ -1351,7 +1367,7 @@ impl Main {
                                 let jobs = Thread::get_jobs(id, &config, &client, JobDetailMode::WithoutManual).await?;
                                 for (name, job) in jobs.into_iter() {
                                     if strict_jobs.is_match(&name) {
-                                        if job.status == "failed" {
+                                        if job.status == "failed" && !job.allow_failure {
                                             failed.push((name, id));
                                         }
                                     }
@@ -1900,6 +1916,15 @@ impl Main {
                                     spans.push(Span::styled(
                                         format!("{}", counts.failed),
                                         Style::default().fg(Color::Red)
+                                    ))
+                                }
+                                if counts.check != 0 {
+                                    if spans.len() != 0 {
+                                        spans.push(sep.clone());
+                                    }
+                                    spans.push(Span::styled(
+                                        format!("{}", counts.check),
+                                        Style::default().fg(CHECK_FAILURE)
                                     ))
                                 }
                                 if counts.running != 0 {

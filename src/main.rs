@@ -1157,7 +1157,7 @@ struct Main {
     state: Arc<Mutex<State>>,
     tx_cmd: mpsc::Sender<RxCmd>,
     rsp_recv: Option<channel::mpsc::Receiver<()>>,
-    prev_mode: Option<RunMode>,
+    prev_mode: Vec<RunMode>,
     mode: RunMode,
     selected_pipeline: tui::widgets::TableState,
     selected_job: tui::widgets::TableState,
@@ -1615,7 +1615,7 @@ impl Main {
             pipelines_select_for_diff: None,
             auto_refresh: !opt.disable_auto_refresh,
             first_load: true,
-            prev_mode: None,
+            prev_mode: vec![],
             key_map: KeyMap::new(),
             help: util::StatefulList::new(),
             mode,
@@ -2650,7 +2650,7 @@ impl Main {
     }
 
     async fn go_to_previous_mode(&mut self) -> Result<(), Error> {
-        if let Some(mode) = self.prev_mode.take() {
+        if let Some(mode) = self.prev_mode.pop() {
             self.mode = mode;
             self.first_load = true;
 
@@ -2790,7 +2790,7 @@ impl Main {
                     if selected < self.merge_requests.len() {
                         let mr = &self.merge_requests[selected];
                         self.selected_pipeline.select(None);
-                        self.prev_mode = Some(std::mem::replace(
+                        self.prev_mode.push(std::mem::replace(
                             &mut self.mode,
                             RunMode::Pipelines(PipelinesMode {
                                 all_users: false,
@@ -2812,7 +2812,7 @@ impl Main {
             }
             RunMode::Pipelines(_) => {
                 if let Some((Some(from), Some(to))) = &self.pipelines_select_for_diff {
-                    self.prev_mode = Some(std::mem::replace(
+                    self.prev_mode.push(std::mem::replace(
                         &mut self.mode,
                         RunMode::PipeDiff(PipeDiff {
                             from: *from,
@@ -2833,7 +2833,7 @@ impl Main {
                     if selected < self.pipelines.len() {
                         let pipeline = &self.pipelines[selected];
                         self.selected_job.select(None);
-                        self.prev_mode = Some(std::mem::replace(
+                        self.prev_mode.push(std::mem::replace(
                             &mut self.mode,
                             RunMode::Jobs(JobsMode {
                                 pipeline_id: pipeline.id,
@@ -3358,14 +3358,14 @@ impl Main {
 
                 match action {
                     Action::Help => {
-                        self.prev_mode = Some(std::mem::replace(&mut self.mode, RunMode::Help))
+                        self.prev_mode.push(std::mem::replace(&mut self.mode, RunMode::Help));
                     }
                     Action::Quit => self.leave = true,
                     Action::QuitOrGoBack => {
                         if let RunMode::Modal(_, prev) = &self.mode {
                             self.mode = (**prev).to_owned();
                         } else {
-                            if self.prev_mode.is_some() {
+                            if self.prev_mode.len() > 0 {
                                 self.go_to_previous_mode().await?
                             } else {
                                 self.leave = true;

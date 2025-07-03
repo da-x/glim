@@ -133,6 +133,7 @@ enum RunMode {
     Pipelines(PipelinesMode),
     PipeDiff(PipeDiff),
     Jobs(JobsMode),
+    MergeRequests(MergeRequestsOptions),
     Modal(Request, Box<RunMode>),
     Help,
     None,
@@ -240,6 +241,8 @@ enum CommandMode {
     /// List merge requests by criteria
     #[structopt(name = "merge-requests")]
     MergeRequests(MergeRequestsOptions),
+    
+
 
     /// Interface for a git aliases that are sensitive to Git's state
     #[structopt(name = "from-alias")]
@@ -252,10 +255,46 @@ enum CommandMode {
 
 #[derive(Debug, StructOpt, Clone)]
 enum MergeRequestsOptions {
+    /// List merge requests by pipeline ID
     ByPipelineId {
         #[structopt(long)]
         pipeline_id: u64,
     },
+    /// List open merge requests (default)
+    #[structopt(name = "open")]
+    Open {
+        /// Limit the number of merge requests to fetch
+        #[structopt(long = "limit", short = "l", default_value = "20")]
+        limit: usize,
+        
+        /// Provide a username to be used instead of the username of the API key user
+        #[structopt(long = "username", short = "u")]
+        custom_username: Option<String>,
+    },
+    /// List merged merge requests
+    #[structopt(name = "merged")]
+    Merged {
+        /// Limit the number of merge requests to fetch
+        #[structopt(long = "limit", short = "l", default_value = "20")]
+        limit: usize,
+        
+        /// Provide a username to be used instead of the username of the API key user
+        #[structopt(long = "username", short = "u")]
+        custom_username: Option<String>,
+    },
+    /// List closed merge requests
+    #[structopt(name = "closed")]
+    Closed {
+        /// Limit the number of merge requests to fetch
+        #[structopt(long = "limit", short = "l", default_value = "20")]
+        limit: usize,
+        
+        /// Provide a username to be used instead of the username of the API key user
+        #[structopt(long = "username", short = "u")]
+        custom_username: Option<String>,
+    },
+
+    // The DefaultBehavior variant has been removed as it was never used
 }
 
 #[derive(Debug, StructOpt, Clone)]
@@ -573,6 +612,7 @@ struct State {
     pipelines: Updatable<Vec<Pipeline>>,
     jobs: Updatable<Vec<Job>>,
     pipediff: Updatable<Vec<JobDiff>>,
+    merge_requests: Updatable<Vec<MyMergeRequestResult>>,
     request_queue: VecDeque<Request>,
     response: Option<(Instant, String)>,
     pipeline_trigger: std::collections::HashMap<u64, String>,
@@ -683,6 +723,7 @@ impl Thread {
                 RunMode::Modal { .. } => {}
                 RunMode::Jobs { .. } => {}
                 RunMode::PipeDiff { .. } => {}
+                RunMode::MergeRequests { .. } => {}
                 RunMode::Pipelines(info) => {
                     if info.resolve_usernames {
                         if let Some(id) = self.pipeline_without_trigger.pop_back() {
@@ -779,6 +820,55 @@ impl Thread {
                 RunMode::None => {}
                 RunMode::Help => {}
                 RunMode::Modal { .. } => {}
+                RunMode::MergeRequests(info) => {
+                    if self.state.lock().await.merge_requests.update {
+                        let merge_requests = match info {
+
+                            MergeRequestsOptions::Open { limit, ref custom_username } => {
+                                get_merge_requests(&self.config, &self.gitlab, MergeRequestState::Opened, custom_username.clone(), *limit).await?
+                            },
+                            MergeRequestsOptions::Merged { limit, ref custom_username } => {
+                                get_merge_requests(&self.config, &self.gitlab, MergeRequestState::Merged, custom_username.clone(), *limit).await?
+                            },
+                            MergeRequestsOptions::Closed { limit, ref custom_username } => {
+                                get_merge_requests(&self.config, &self.gitlab, MergeRequestState::Closed, custom_username.clone(), *limit).await?
+                            },
+                            MergeRequestsOptions::ByPipelineId { pipeline_id } => {
+                                // For ByPipelineId, we need to get the pipeline ref first
+                                let mut endpoint = projects::pipelines::Pipeline::builder();
+                                endpoint.project(self.config.project.clone());
+                                endpoint.pipeline(*pipeline_id);
+                                let endpoint = endpoint.build().map_err(Error::BuilderError)?;
+                                let pipeline_details: PipelineDetails = endpoint
+                                    .query_async(&self.gitlab)
+                                    .await
+                                    .map_err(|x| Error::BoxError(Box::new(x)))?;
+                                
+                                if let Some(r) = pipeline_details.r#ref {
+                                    let mrs = get_merge_requests_by_pipeline(&self.config, &r, &self.gitlab).await?;
+                                    // Convert to MyMergeRequestResult format
+                                    mrs.into_iter().map(|mr| MyMergeRequestResult {
+                                        iid: mr.iid,
+                                        title: format!("Merge request from {} to {}", r, mr.target_branch),
+                                        source_branch: r.clone(),
+                                        target_branch: mr.target_branch,
+                                    }).collect()
+                                } else {
+                                    vec![]
+                                }
+                            },
+                            // The DefaultBehavior case has been removed as it was never used
+                        };
+
+                        let mut state = self.state.lock().await;
+                        if state.merge_requests.update {
+                            state.merge_requests.data = Some((Instant::now(), merge_requests));
+                            state.request_count += 1;
+                            updates += 1;
+                            state.merge_requests.updated();
+                        }
+                    }
+                }
                 RunMode::Jobs(info) => {
                     let mut jobs = vec![];
 
@@ -1077,6 +1167,7 @@ struct Main {
     selected_pipeline: tui::widgets::TableState,
     selected_job: tui::widgets::TableState,
     selected_pipediff: tui::widgets::TableState,
+    selected_merge_request: tui::widgets::TableState,
     help: util::StatefulList<String>,
     key_map: KeyMap<Action>,
     ignored_pipeline_ids: std::collections::HashSet<u64>,
@@ -1084,6 +1175,7 @@ struct Main {
     jobs: Vec<Job>,
     r#ref_save: Option<String>,
     pipediffs: Vec<JobDiff>,
+    merge_requests: Vec<MyMergeRequestResult>,
     config: Config,
     opt: CommandArgs,
     debug: bool,
@@ -1098,6 +1190,50 @@ struct Main {
 }
 
 impl Main {
+    // Add this helper method
+    fn print_merge_requests(
+        merge_requests: &[MyMergeRequestResult],
+        stdout: &mut std::io::Stdout,
+        config: &Config,
+        json_output: bool
+    ) -> Result<(), Error> {
+        use std::io::Write;
+        
+        for mr in merge_requests {
+            if json_output {
+                // Serialize to string first
+                let mut json_str = serde_json::to_string(&mr)?;
+                
+                // Replace the placeholder with the actual URL
+                let placeholder = format!("\"__MR_URL_PLACEHOLDER_{}\"", mr.iid);
+                let actual_url = format!("\"{}\"", config.get_merge_request_url(mr.iid));
+                json_str = json_str.replace(&placeholder, &actual_url);
+                
+                if let Err(e) = writeln!(stdout, "{}", json_str) {
+                    if e.kind() != std::io::ErrorKind::BrokenPipe {
+                        eprintln!("{}", e);
+                        return Err(e.into());
+                    }
+                }
+            } else {
+                if let Err(e) = writeln!(stdout, "!{} {} -> {} - {}   {}",
+                    mr.iid,
+                    mr.source_branch,
+                    mr.target_branch,
+                    mr.title,
+                    config.get_merge_request_url(mr.iid))
+                {
+                    if e.kind() != std::io::ErrorKind::BrokenPipe {
+                        eprintln!("{}", e);
+                        return Err(e.into());
+                    }
+                }
+            }
+        }
+        
+        Ok(())
+    }
+
     fn get_remote_branch(config: &Config) -> Result<String, Error> {
         let shell = std::env::var("SHELL")?;
         let mut command = Command::new(shell);
@@ -1119,6 +1255,7 @@ impl Main {
         client: &AsyncGitlab,
         mode: CommandMode,
         config: &Config,
+        _json_output: bool,
     ) -> Result<RunMode, Error> {
         let alias = match mode {
             CommandMode::Pipelines(x) => return Ok(RunMode::Pipelines(x)),
@@ -1181,9 +1318,7 @@ impl Main {
                 return Ok(RunMode::None);
             }
             CommandMode::MergeRequests(opts) => {
-                let _ = Self::handle_merge_requests(opts, config, client).await?;
-
-                return Ok(RunMode::None);
+                return Ok(RunMode::MergeRequests(opts));
             },
         };
 
@@ -1241,38 +1376,7 @@ impl Main {
         }
     }
 
-    async fn handle_merge_requests(
-        opts: MergeRequestsOptions,
-        config: &Config,
-        client: &AsyncGitlab,
-    ) -> Result<(), Error> {
-        match opts {
-            MergeRequestsOptions::ByPipelineId{pipeline_id} => {
-                let mut endpoint = projects::pipelines::Pipeline::builder();
-                endpoint.project(config.project.clone());
-                endpoint.pipeline(pipeline_id);
-                let endpoint = endpoint.build()
-                    .map_err(Error::BuilderError)?;
-                let rsp: Result<_, _> = endpoint
-                    .query_async(client)
-                    .await;
-
-                let pipeline_details: PipelineDetails = rsp
-                    .map_err(|x| Error::BoxError(Box::new(x)))?;
-
-                if let Some(r) = pipeline_details.r#ref {
-                    for rs in get_merge_requests_by_pipeline(config, &r, client).await? {
-                        println!("{} -> {}   {}",
-                            r,
-                            rs.target_branch,
-                            config.get_merge_request_url(rs.iid));
-                    }
-                }
-            },
-        }
-
-        Ok(())
-    }
+    // The handle_merge_requests function has been removed as it was never used
 
     async fn handle_wait(
         opts: WaitOptions,
@@ -1457,7 +1561,7 @@ impl Main {
 
         let debug = opt.debug;
 
-        let mode = Self::command_mode_to_run_mode(&client, opt.command.clone(), &config).await?;
+        let mode = Self::command_mode_to_run_mode(&client, opt.command.clone(), &config, opt.json_output).await?;
         let mode2 = mode.clone();
 
         let current_user_ = current_user.clone();
@@ -1500,11 +1604,13 @@ impl Main {
             selected_pipeline: Default::default(),
             selected_job: Default::default(),
             selected_pipediff: Default::default(),
+            selected_merge_request: Default::default(),
             ignored_pipeline_ids: Default::default(),
             pipelines: vec![],
             jobs: vec![],
             r#ref_save: None,
             pipediffs: vec![],
+            merge_requests: vec![],
             leave: false,
             non_interactive: opt.non_interactive,
             tx_cmd: tx,
@@ -1632,6 +1738,14 @@ impl Main {
                             updates += 1;
                         }
                     }
+                    RunMode::MergeRequests { .. } => {
+                        if state
+                            .merge_requests
+                            .check_expiry(std::time::Duration::from_millis(self.config.refresh * 1000))
+                        {
+                            updates += 1;
+                        }
+                    }
                 }
                 if let Some((instant, _)) = &state.response {
                     if instant.elapsed() > std::time::Duration::from_secs(
@@ -1699,6 +1813,7 @@ impl Main {
             RunMode::None => Ok(()),
             RunMode::PipeDiff(info) => self.draw_pipediff(info).await,
             RunMode::Pipelines(info) => self.draw_pipelines(info).await,
+            RunMode::MergeRequests(info) => self.draw_merge_requests(info).await,
             RunMode::Help => self.draw_help().await,
             RunMode::Jobs { .. } => self.draw_jobs().await,
         }
@@ -1714,6 +1829,9 @@ impl Main {
             }
             RunMode::Pipelines { .. } => {
                 return self.non_interactive_pipelines().await;
+            }
+            RunMode::MergeRequests { .. } => {
+                return self.non_interactive_merge_requests().await;
             }
             _ => {}
         };
@@ -1767,6 +1885,18 @@ impl Main {
                     }
                 }
             }
+            return Ok(true);
+        }
+
+        Ok(false)
+    }
+
+    async fn non_interactive_merge_requests(&mut self) -> Result<bool, Error> {
+        let state = self.state.lock().await;
+        let mut stdout = std::io::stdout();
+
+        if let Some((_, merge_requests)) = &state.merge_requests.data {
+            Self::print_merge_requests(merge_requests, &mut stdout, &self.config, self.opt.json_output)?;
             return Ok(true);
         }
 
@@ -2130,6 +2260,103 @@ impl Main {
         Ok(())
     }
 
+    async fn draw_merge_requests(&mut self, info: MergeRequestsOptions) -> Result<(), Error> {
+        let state = self.state.lock().await;
+
+        state
+            .merge_requests
+            .fix_selected(&mut self.selected_merge_request, Some(self.merge_requests.len()));
+        let selected_merge_request = &mut self.selected_merge_request;
+        let merge_request_ids = &mut self.merge_requests;
+        let sparkline = Self::status_line(&*state, self.auto_refresh);
+        let modal = self.modal.clone();
+
+        self.terminal.as_mut().unwrap().draw(|rect| {
+            let mut items: Vec<_> = vec![];
+            merge_request_ids.clear();
+
+            if let Some((_, merge_requests)) = &state.merge_requests.data {
+                for mr in merge_requests.iter() {
+                    merge_request_ids.push((*mr).clone());
+
+                    items.push(Row::new(vec![
+                        Cell::from(Span::raw(format!("!{}", mr.iid))),
+                        Cell::from(Span::raw(mr.source_branch.to_string())),
+                        Cell::from(Span::raw(mr.target_branch.to_string())),
+                        Cell::from(Span::raw(mr.title.to_string())),
+                    ]));
+                }
+            }
+
+            let title = match &info {
+                MergeRequestsOptions::Open { limit, custom_username } => {
+                    if let Some(username) = custom_username {
+                        format!("Open Merge Requests for {} (limit: {})", username, limit)
+                    } else {
+                        format!("My Open Merge Requests (limit: {})", limit)
+                    }
+                },
+                MergeRequestsOptions::Merged { limit, custom_username } => {
+                    if let Some(username) = custom_username {
+                        format!("Merged Merge Requests for {} (limit: {})", username, limit)
+                    } else {
+                        format!("My Merged Merge Requests (limit: {})", limit)
+                    }
+                },
+                MergeRequestsOptions::Closed { limit, custom_username } => {
+                    if let Some(username) = custom_username {
+                        format!("Closed Merge Requests for {} (limit: {})", username, limit)
+                    } else {
+                        format!("My Closed Merge Requests (limit: {})", limit)
+                    }
+                },
+                MergeRequestsOptions::ByPipelineId { pipeline_id } => format!("Merge Requests for Pipeline {}", pipeline_id)
+            };
+
+            let merge_requests_table = Table::new(items)
+                .header(Row::new(vec![
+                    Cell::from(Span::styled(
+                        "MR",
+                        Style::default().add_modifier(Modifier::BOLD),
+                    )),
+                    Cell::from(Span::styled(
+                        "Source Branch",
+                        Style::default().add_modifier(Modifier::BOLD),
+                    )),
+                    Cell::from(Span::styled(
+                        "Target Branch",
+                        Style::default().add_modifier(Modifier::BOLD),
+                    )),
+                    Cell::from(Span::styled(
+                        "Title",
+                        Style::default().add_modifier(Modifier::BOLD),
+                    )),
+                ]))
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .style(Style::default().fg(Color::White))
+                        .title(title)
+                        .border_type(BorderType::Plain),
+                )
+                .highlight_style(Style::default().bg(Color::Rgb(60, 60, 80)))
+                .widths(&[
+                    Constraint::Length(10),
+                    Constraint::Length(25),
+                    Constraint::Length(25),
+                    Constraint::Min(40),
+                ]);
+
+            let chunks = Self::divide_for_status_line(rect.size());
+            rect.render_stateful_widget(merge_requests_table, chunks[0], selected_merge_request);
+            rect.render_widget(sparkline, chunks[1]);
+
+            Self::draw_modal(&modal, rect)
+        })?;
+
+        Ok(())
+    }
+
     async fn draw_help(&mut self) -> Result<(), Error> {
         let help = &mut self.help;
 
@@ -2359,6 +2586,7 @@ impl Main {
             RunMode::Jobs(_) => state.jobs.up(&mut self.selected_job, None),
             RunMode::Pipelines(_) => state.pipelines.up(&mut self.selected_pipeline, None),
             RunMode::PipeDiff { .. } => state.pipediff.up(&mut self.selected_pipediff, None),
+            RunMode::MergeRequests(_) => state.merge_requests.up(&mut self.selected_merge_request, None),
         }
 
         Ok(())
@@ -2380,6 +2608,9 @@ impl Main {
             RunMode::PipeDiff { .. } => state
                 .pipediff
                 .down(&mut self.selected_pipediff, Some(self.pipediffs.len())),
+            RunMode::MergeRequests(_) => state
+                .merge_requests
+                .down(&mut self.selected_merge_request, Some(self.merge_requests.len())),
         }
 
         Ok(())
@@ -2395,6 +2626,7 @@ impl Main {
             RunMode::Jobs(_) => state.jobs.home(&mut self.selected_job, None),
             RunMode::Pipelines(_) => state.pipelines.home(&mut self.selected_pipeline, None),
             RunMode::PipeDiff { .. } => state.pipediff.home(&mut self.selected_pipediff, None),
+            RunMode::MergeRequests(_) => state.merge_requests.home(&mut self.selected_merge_request, None),
         }
 
         Ok(())
@@ -2416,15 +2648,41 @@ impl Main {
             RunMode::PipeDiff { .. } => state
                 .pipediff
                 .end(&mut self.selected_pipediff, Some(self.pipediffs.len())),
+            RunMode::MergeRequests(_) => state
+                .merge_requests
+                .end(&mut self.selected_merge_request, Some(self.merge_requests.len())),
         }
 
         Ok(())
     }
 
-    fn go_to_previous_mode(&mut self) -> Result<(), Error> {
+    async fn go_to_previous_mode(&mut self) -> Result<(), Error> {
         if let Some(mode) = self.prev_mode.take() {
             self.mode = mode;
             self.first_load = true;
+            
+            // Clear data for the mode we're returning to so it gets refreshed
+            let mut state = self.state.lock().await;
+            match &self.mode {
+                RunMode::MergeRequests(_) => {
+                    state.merge_requests.data = None;
+                    state.merge_requests.update = true;
+                }
+                RunMode::Pipelines(_) => {
+                    state.pipelines.data = None;
+                    state.pipelines.update = true;
+                }
+                RunMode::Jobs(_) => {
+                    state.jobs.data = None;
+                    state.jobs.update = true;
+                }
+                RunMode::PipeDiff(_) => {
+                    state.pipediff.data = None;
+                    state.pipediff.update = true;
+                }
+                _ => {}
+            }
+            
             let _ = self.tx_cmd.try_send(RxCmd::UpdateMode(self.mode.clone()));
         }
 
@@ -2534,6 +2792,31 @@ impl Main {
                     }
                 }
             }
+            RunMode::MergeRequests(_) => {
+                if let Some(selected) = self.selected_merge_request.selected() {
+                    if selected < self.merge_requests.len() {
+                        let mr = &self.merge_requests[selected];
+                        self.selected_pipeline.select(None);
+                        self.prev_mode = Some(std::mem::replace(
+                            &mut self.mode,
+                            RunMode::Pipelines(PipelinesMode {
+                                all_users: false,
+                                custom_username: None,
+                                nr_pipelines: 50,
+                                resolve_job_counts: false,
+                                resolve_usernames: false,
+                                r#ref: Some(mr.source_branch.clone()),
+                                commithash: None,
+                            }),
+                        ));
+                        self.first_load = true;
+                        let mut state = self.state.lock().await;
+                        state.pipelines.data = None;
+                        state.pipelines.update = true;
+                        let _ = self.tx_cmd.try_send(RxCmd::UpdateMode(self.mode.clone()));
+                    }
+                }
+            }
             RunMode::Pipelines(_) => {
                 if let Some((Some(from), Some(to))) = &self.pipelines_select_for_diff {
                     self.prev_mode = Some(std::mem::replace(
@@ -2548,6 +2831,7 @@ impl Main {
 
                     let mut state = self.state.lock().await;
                     state.pipediff.data = None;
+                    state.pipelines.update = true;
                     let _ = self.tx_cmd.try_send(RxCmd::UpdateMode(self.mode.clone()));
                     return Ok(());
                 }
@@ -2566,6 +2850,7 @@ impl Main {
                         self.first_load = true;
                         let mut state = self.state.lock().await;
                         state.jobs.data = None;
+                        state.pipelines.update = true;
                         let _ = self.tx_cmd.try_send(RxCmd::UpdateMode(self.mode.clone()));
                     }
                 }
@@ -2704,6 +2989,14 @@ impl Main {
                     }
                 }
             }
+            RunMode::MergeRequests(_) => {
+                if let Some(selected) = self.selected_merge_request.selected() {
+                    if selected < self.merge_requests.len() {
+                        let mr = &self.merge_requests[selected];
+                        self.webbrowser_open(self.config.get_merge_request_url(mr.iid))?;
+                    }
+                }
+            }
         }
 
         Ok(())
@@ -2716,6 +3009,7 @@ impl Main {
             RunMode::Help => {}
             RunMode::Jobs(_) => {}
             RunMode::PipeDiff(_) => {}
+            RunMode::MergeRequests(_) => {}
             RunMode::Pipelines(info) => {
                 info.resolve_usernames = !info.resolve_usernames;
                 let _ = self.tx_cmd.try_send(RxCmd::UpdateMode(self.mode.clone()));
@@ -2732,6 +3026,7 @@ impl Main {
             RunMode::Help => {}
             RunMode::Jobs(_) => {}
             RunMode::PipeDiff(_) => {}
+            RunMode::MergeRequests(_) => {}
             RunMode::Pipelines(info) => {
                 info.resolve_job_counts = !info.resolve_job_counts;
                 let _ = self.tx_cmd.try_send(RxCmd::UpdateMode(self.mode.clone()));
@@ -2748,6 +3043,7 @@ impl Main {
             RunMode::Help => {}
             RunMode::Jobs(_) => {}
             RunMode::PipeDiff(_) => {}
+            RunMode::MergeRequests(_) => {}
             RunMode::Pipelines(info) => {
                 if !info.resolve_job_counts {
                     info.resolve_job_counts = true;
@@ -2772,6 +3068,7 @@ impl Main {
             RunMode::None => {}
             RunMode::Modal { .. } => {}
             RunMode::Help => {}
+            RunMode::MergeRequests(_) => {}
             RunMode::Jobs(info) => {
                 info.manual_jobs = !info.manual_jobs;
                 let _ = self.tx_cmd.try_send(RxCmd::UpdateMode(self.mode.clone()));
@@ -2795,6 +3092,7 @@ impl Main {
             RunMode::Help => {}
             RunMode::Jobs(_) => {}
             RunMode::PipeDiff(_) => {}
+            RunMode::MergeRequests(_) => {}
             RunMode::Pipelines(info) => {
                 if info.r#ref.is_some() {
                     self.r#ref_save = info.r#ref.take();
@@ -2804,6 +3102,7 @@ impl Main {
 
                 let mut state = self.state.lock().await;
                 state.pipelines.data = None;
+                state.pipelines.update = true;
                 let _ = self.tx_cmd.try_send(RxCmd::UpdateMode(self.mode.clone()));
             }
         }
@@ -2811,7 +3110,7 @@ impl Main {
         Ok(())
     }
 
-    fn delete_pipeline(&mut self) -> Result<(), Error> {
+    async fn delete_pipeline(&mut self) -> Result<(), Error> {
         match &mut self.mode {
             RunMode::Modal { .. } => {}
             RunMode::None => {}
@@ -2819,9 +3118,10 @@ impl Main {
             RunMode::Jobs(info) => {
                 let pipeline_id = info.pipeline_id;
                 self.seek_request(Request::DeletePipeline(pipeline_id));
-                self.go_to_previous_mode()?;
+                self.go_to_previous_mode().await?;
             }
             RunMode::PipeDiff(_) => {}
+            RunMode::MergeRequests(_) => {}
             RunMode::Pipelines(_) => {
                 if let Some(selected) = self.selected_pipeline.selected() {
                     if selected < self.pipelines.len() {
@@ -2851,6 +3151,7 @@ impl Main {
                 }
             }
             RunMode::PipeDiff(_) => {}
+            RunMode::MergeRequests(_) => {}
             RunMode::Pipelines(_) => {}
         }
 
@@ -2872,6 +3173,7 @@ impl Main {
                 }
             }
             RunMode::PipeDiff(_) => {}
+            RunMode::MergeRequests(_) => {}
             RunMode::Pipelines(_) => {
                 if let Some(selected) = self.selected_pipeline.selected() {
                     if selected < self.pipelines.len() {
@@ -2902,6 +3204,7 @@ impl Main {
                 }
             }
             RunMode::PipeDiff(_) => {}
+            RunMode::MergeRequests(_) => {}
             RunMode::Pipelines(_) => {
                 if let Some(selected) = self.selected_pipeline.selected() {
                     if selected < self.pipelines.len() {
@@ -2931,6 +3234,7 @@ impl Main {
                 }
             }
             RunMode::PipeDiff(_) => {}
+            RunMode::MergeRequests(_) => {}
             RunMode::Pipelines(_) => {}
         }
 
@@ -2961,6 +3265,7 @@ impl Main {
             RunMode::Help => {}
             RunMode::Jobs(_) => {}
             RunMode::PipeDiff(_) => {}
+            RunMode::MergeRequests(_) => {}
             RunMode::Pipelines(_info) => {}
         }
 
@@ -2973,6 +3278,7 @@ impl Main {
             RunMode::None => {}
             RunMode::Help => {}
             RunMode::Jobs(_) => {}
+            RunMode::MergeRequests(_) => {}
             RunMode::PipeDiff(ref info) => {
                 if let Some(selected) = self.selected_pipediff.selected() {
                     if selected < self.pipediffs.len() {
@@ -2998,6 +3304,7 @@ impl Main {
             RunMode::Help => {}
             RunMode::Jobs(_) => {}
             RunMode::PipeDiff { .. } => {}
+            RunMode::MergeRequests(_) => {}
             RunMode::Pipelines(_) => {
                 if let Some(selected) = self.selected_pipeline.selected() {
                     if selected < self.pipelines.len() {
@@ -3021,6 +3328,7 @@ impl Main {
             RunMode::Help => {}
             RunMode::Jobs(_) => {}
             RunMode::PipeDiff { .. } => {}
+            RunMode::MergeRequests(_) => {}
             RunMode::Pipelines(_) => {
                 if let Some(local_repo) = &self.config.local_repo {
                     if let Some(selected) = self.selected_pipeline.selected() {
@@ -3065,7 +3373,7 @@ impl Main {
                             self.mode = (**prev).to_owned();
                         } else {
                             if self.prev_mode.is_some() {
-                                self.go_to_previous_mode()?
+                                self.go_to_previous_mode().await?
                             } else {
                                 self.leave = true;
                             }
@@ -3106,7 +3414,7 @@ impl Main {
                         if let RunMode::Modal(_, prev) = &self.mode {
                             self.mode = (**prev).to_owned();
                         } else {
-                            self.go_to_previous_mode()?;
+                            self.go_to_previous_mode().await?;
                         }
                     }
                     Action::SetToDiff => self.on_set_pipediff_range(false)?,
@@ -3120,7 +3428,7 @@ impl Main {
                     Action::TriggerJobSummaries => self.trigger_job_summaries().await?,
                     Action::ToggleManualJobs => self.toggle_manual_jobs().await?,
                     Action::ToggleAllRefs => self.toggle_all_refs().await?,
-                    Action::DeletePipeline => self.delete_pipeline()?,
+                    Action::DeletePipeline => self.delete_pipeline().await?,
                     Action::CancelPipeline => self.cancel_pipeline()?,
                     Action::Retry => self.retry()?,
                     Action::PlayJob => self.play()?,
@@ -3152,10 +3460,38 @@ impl Main {
     }
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Serialize, Debug)]
 struct MergeRequestResult {
     iid: u64,
     target_branch: String,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+struct MyMergeRequestResult {
+    iid: u64,
+    title: String,
+    source_branch: String,
+    target_branch: String,
+}
+
+// Custom serialization to include the web_url
+impl Serialize for MyMergeRequestResult {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("MyMergeRequestResult", 5)?;
+        state.serialize_field("iid", &self.iid)?;
+        state.serialize_field("title", &self.title)?;
+        state.serialize_field("source_branch", &self.source_branch)?;
+        state.serialize_field("target_branch", &self.target_branch)?;
+        
+        // We don't have access to the config here, so we can't generate the actual URL
+        // But we include a placeholder that will be replaced in the print_merge_requests function
+        state.serialize_field("web_url", &format!("__MR_URL_PLACEHOLDER_{}", self.iid))?;
+        state.end()
+    }
 }
 
 async fn get_merge_requests_by_pipeline(config: &Config, r: &String, client: &AsyncGitlab) -> Result<Vec<MergeRequestResult>, Error> {
@@ -3171,6 +3507,76 @@ async fn get_merge_requests_by_pipeline(config: &Config, r: &String, client: &As
         .query_async(client)
         .await
         .map_err(|x| Error::BoxError(Box::new(x)))?)
+}
+
+
+async fn get_merge_requests(
+    config: &Config, 
+    client: &AsyncGitlab, 
+    state: MergeRequestState,
+    username: Option<String>,
+    limit: usize
+) -> Result<Vec<MyMergeRequestResult>, Error> {
+    // Define a struct to get user ID
+    #[derive(Deserialize, Debug)]
+    struct UserWithId {
+        id: u64,
+        #[allow(dead_code)]
+        username: String,
+    }
+    
+    // Get the user ID to filter by author
+    let user_id = if let Some(username) = username {
+        // If username is provided, search for that user
+        let user_endpoint = users::Users::builder()
+            .username(&username)
+            .build()
+            .map_err(Error::BuilderError)?;
+        
+        let users: Vec<UserWithId> = user_endpoint
+            .query_async(client)
+            .await
+            .map_err(|x| Error::BoxError(Box::new(x)))?;
+            
+        if let Some(user) = users.first() {
+            // Use the found user's ID
+            user.id
+        } else {
+            // User not found, return an error
+            return Err(Error::Command(format!("Username '{}' not found", username)));
+        }
+    } else {
+        // Use the current user's ID
+        let current_user_endpoint = users::CurrentUser::builder()
+            .build()
+            .map_err(Error::BuilderError)?;
+        
+        let current_user: UserWithId = current_user_endpoint
+            .query_async(client)
+            .await
+            .map_err(|x| Error::BoxError(Box::new(x)))?;
+            
+        current_user.id
+    };
+    
+    // Create the builder after getting the user ID
+    let endpoint = MergeRequests::builder()
+        .project(config.project.clone())
+        .state(state)
+        .sort(SortOrder::Descending)
+        .author(user_id)
+        .build()
+        .map_err(Error::BuilderError)?;
+
+    let mut merge_requests: Vec<MyMergeRequestResult> = endpoint
+        .query_async(client)
+        .await
+        .map_err(|x| Error::BoxError(Box::new(x)))?;
+
+    // Limit results to requested number
+    merge_requests.truncate(limit);
+
+    Ok(merge_requests)
 }
 
 fn main_wrap() -> Result<(), Error> {

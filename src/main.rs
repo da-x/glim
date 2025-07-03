@@ -262,9 +262,9 @@ enum MergeRequestsOptions {
     #[structopt(name = "open")]
     Open {
         /// Limit the number of merge requests to fetch
-        #[structopt(long = "limit", short = "l", default_value = "20")]
+        #[structopt(long = "limit", short = "l", default_value = "50")]
         limit: usize,
-        
+
         /// Provide a username to be used instead of the username of the API key user
         #[structopt(long = "username", short = "u")]
         custom_username: Option<String>,
@@ -273,9 +273,9 @@ enum MergeRequestsOptions {
     #[structopt(name = "merged")]
     Merged {
         /// Limit the number of merge requests to fetch
-        #[structopt(long = "limit", short = "l", default_value = "20")]
+        #[structopt(long = "limit", short = "l", default_value = "50")]
         limit: usize,
-        
+
         /// Provide a username to be used instead of the username of the API key user
         #[structopt(long = "username", short = "u")]
         custom_username: Option<String>,
@@ -284,15 +284,13 @@ enum MergeRequestsOptions {
     #[structopt(name = "closed")]
     Closed {
         /// Limit the number of merge requests to fetch
-        #[structopt(long = "limit", short = "l", default_value = "20")]
+        #[structopt(long = "limit", short = "l", default_value = "50")]
         limit: usize,
-        
+
         /// Provide a username to be used instead of the username of the API key user
         #[structopt(long = "username", short = "u")]
         custom_username: Option<String>,
     },
-
-    // The DefaultBehavior variant has been removed as it was never used
 }
 
 #[derive(Debug, StructOpt, Clone)]
@@ -841,7 +839,7 @@ impl Thread {
                                     .query_async(&self.gitlab)
                                     .await
                                     .map_err(|x| Error::BoxError(Box::new(x)))?;
-                                
+
                                 if let Some(r) = pipeline_details.r#ref {
                                     let mrs = get_merge_requests_by_pipeline(&self.config, &r, &self.gitlab).await?;
                                     // Convert to MyMergeRequestResult format
@@ -855,7 +853,6 @@ impl Thread {
                                     vec![]
                                 }
                             },
-                            // The DefaultBehavior case has been removed as it was never used
                         };
 
                         let mut state = self.state.lock().await;
@@ -1196,17 +1193,17 @@ impl Main {
         json_output: bool
     ) -> Result<(), Error> {
         use std::io::Write;
-        
+
         for mr in merge_requests {
             if json_output {
                 // Serialize to string first
                 let mut json_str = serde_json::to_string(&mr)?;
-                
+
                 // Replace the placeholder with the actual URL
                 let placeholder = format!("\"__MR_URL_PLACEHOLDER_{}\"", mr.iid);
                 let actual_url = format!("\"{}\"", config.get_merge_request_url(mr.iid));
                 json_str = json_str.replace(&placeholder, &actual_url);
-                
+
                 if let Err(e) = writeln!(stdout, "{}", json_str) {
                     if e.kind() != std::io::ErrorKind::BrokenPipe {
                         eprintln!("{}", e);
@@ -1228,7 +1225,7 @@ impl Main {
                 }
             }
         }
-        
+
         Ok(())
     }
 
@@ -1373,8 +1370,6 @@ impl Main {
             }
         }
     }
-
-    // The handle_merge_requests function has been removed as it was never used
 
     async fn handle_wait(
         opts: WaitOptions,
@@ -2658,7 +2653,7 @@ impl Main {
         if let Some(mode) = self.prev_mode.take() {
             self.mode = mode;
             self.first_load = true;
-            
+
             // Clear data for the mode we're returning to so it gets refreshed
             let mut state = self.state.lock().await;
             match &self.mode {
@@ -2680,7 +2675,7 @@ impl Main {
                 }
                 _ => {}
             }
-            
+
             let _ = self.tx_cmd.try_send(RxCmd::UpdateMode(self.mode.clone()));
         }
 
@@ -3484,7 +3479,7 @@ impl Serialize for MyMergeRequestResult {
         state.serialize_field("title", &self.title)?;
         state.serialize_field("source_branch", &self.source_branch)?;
         state.serialize_field("target_branch", &self.target_branch)?;
-        
+
         // We don't have access to the config here, so we can't generate the actual URL
         // But we include a placeholder that will be replaced in the print_merge_requests function
         state.serialize_field("web_url", &format!("__MR_URL_PLACEHOLDER_{}", self.iid))?;
@@ -3509,8 +3504,8 @@ async fn get_merge_requests_by_pipeline(config: &Config, r: &String, client: &As
 
 
 async fn get_merge_requests(
-    config: &Config, 
-    client: &AsyncGitlab, 
+    config: &Config,
+    client: &AsyncGitlab,
     state: MergeRequestState,
     username: Option<String>,
     limit: usize
@@ -3522,7 +3517,7 @@ async fn get_merge_requests(
         #[allow(dead_code)]
         username: String,
     }
-    
+
     // Get the user ID to filter by author
     let user_id = if let Some(username) = username {
         // If username is provided, search for that user
@@ -3530,12 +3525,12 @@ async fn get_merge_requests(
             .username(&username)
             .build()
             .map_err(Error::BuilderError)?;
-        
+
         let users: Vec<UserWithId> = user_endpoint
             .query_async(client)
             .await
             .map_err(|x| Error::BoxError(Box::new(x)))?;
-            
+
         if let Some(user) = users.first() {
             // Use the found user's ID
             user.id
@@ -3548,15 +3543,15 @@ async fn get_merge_requests(
         let current_user_endpoint = users::CurrentUser::builder()
             .build()
             .map_err(Error::BuilderError)?;
-        
+
         let current_user: UserWithId = current_user_endpoint
             .query_async(client)
             .await
             .map_err(|x| Error::BoxError(Box::new(x)))?;
-            
+
         current_user.id
     };
-    
+
     // Create the builder after getting the user ID
     let endpoint = MergeRequests::builder()
         .project(config.project.clone())

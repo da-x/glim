@@ -3561,6 +3561,11 @@ async fn get_merge_requests(
         .build()
         .map_err(Error::BuilderError)?;
 
+    let endpoint = gitlab::api::paged(
+        endpoint,
+        gitlab::api::Pagination::Limit(limit),
+    );
+
     let mut merge_requests: Vec<MyMergeRequestResult> = endpoint
         .query_async(client)
         .await

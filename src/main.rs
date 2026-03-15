@@ -668,7 +668,7 @@ impl Thread {
                 .pipeline(pipeline_id)
                 .scopes(scopes.into_iter())
                 .build()
-                .map_err(Error::BuilderError)?;
+                .map_err(|e| Error::BuilderError(e.to_string()))?;
 
             let endpoint = gitlab::api::paged(endpoint, gitlab::api::Pagination::All);
             let jobs_query = endpoint.query_async(gitlab);
@@ -678,7 +678,7 @@ impl Thread {
                 .project(config.project.clone())
                 .pipeline(pipeline_id)
                 .build()
-                .map_err(Error::BuilderError)?;
+                .map_err(|e| Error::BuilderError(e.to_string()))?;
             let endpoint = gitlab::api::paged(endpoint, gitlab::api::Pagination::All);
             let bridges_query = endpoint.query_async(&gitlab);
 
@@ -727,7 +727,7 @@ impl Thread {
                                 .project(self.config.project.clone())
                                 .pipeline(id)
                                 .build()
-                                .map_err(Error::BuilderError)?;
+                                .map_err(|e| Error::BuilderError(e.to_string()))?;
                             let pipeline: PipelineDetails = endpoint
                                 .query_async(&self.gitlab)
                                 .await
@@ -834,7 +834,7 @@ impl Thread {
                                 let mut endpoint = projects::pipelines::Pipeline::builder();
                                 endpoint.project(self.config.project.clone());
                                 endpoint.pipeline(*pipeline_id);
-                                let endpoint = endpoint.build().map_err(Error::BuilderError)?;
+                                let endpoint = endpoint.build().map_err(|e| Error::BuilderError(e.to_string()))?;
                                 let pipeline_details: PipelineDetails = endpoint
                                     .query_async(&self.gitlab)
                                     .await
@@ -927,7 +927,7 @@ impl Thread {
                         if let Some(r#ref) = &info.r#ref {
                             endpoint.ref_(r#ref.to_owned());
                         }
-                        let endpoint = endpoint.build().map_err(Error::BuilderError)?;
+                        let endpoint = endpoint.build().map_err(|e| Error::BuilderError(e.to_string()))?;
                         let endpoint = gitlab::api::paged(
                             endpoint,
                             gitlab::api::Pagination::Limit(info.nr_pipelines),
@@ -978,7 +978,7 @@ impl Thread {
                             .project(self.config.project.clone())
                             .pipeline(pipeline_id)
                             .build()
-                            .map_err(Error::BuilderError)?;
+                            .map_err(|e| Error::BuilderError(e.to_string()))?;
                         let rsp: Result<_, _> =
                             gitlab::api::raw(endpoint).query_async(&self.gitlab).await;
                         let mut state = self.state.lock().await;
@@ -991,7 +991,7 @@ impl Thread {
                             .project(self.config.project.clone())
                             .pipeline(pipeline_id)
                             .build()
-                            .map_err(Error::BuilderError)?;
+                            .map_err(|e| Error::BuilderError(e.to_string()))?;
                         let rsp: Result<_, _> =
                             gitlab::api::raw(endpoint).query_async(&self.gitlab).await;
                         let mut state = self.state.lock().await;
@@ -1004,7 +1004,7 @@ impl Thread {
                             .project(self.config.project.clone())
                             .job(job_id)
                             .build()
-                            .map_err(Error::BuilderError)?;
+                            .map_err(|e| Error::BuilderError(e.to_string()))?;
                         let rsp: Result<_, _> =
                             gitlab::api::raw(endpoint).query_async(&self.gitlab).await;
                         let mut state = self.state.lock().await;
@@ -1016,7 +1016,7 @@ impl Thread {
                             .project(self.config.project.clone())
                             .job(job_id)
                             .build()
-                            .map_err(Error::BuilderError)?;
+                            .map_err(|e| Error::BuilderError(e.to_string()))?;
                         let rsp: Result<_, _> =
                             gitlab::api::raw(endpoint).query_async(&self.gitlab).await;
                         let mut state = self.state.lock().await;
@@ -1028,7 +1028,7 @@ impl Thread {
                             .project(self.config.project.clone())
                             .job(job_id)
                             .build()
-                            .map_err(Error::BuilderError)?;
+                            .map_err(|e| Error::BuilderError(e.to_string()))?;
                         let rsp: Result<_, _> =
                             gitlab::api::raw(endpoint).query_async(&self.gitlab).await;
                         let mut state = self.state.lock().await;
@@ -1040,7 +1040,7 @@ impl Thread {
                             .project(self.config.project.clone())
                             .pipeline(pipeline_id)
                             .build()
-                            .map_err(Error::BuilderError)?;
+                            .map_err(|e| Error::BuilderError(e.to_string()))?;
                         let rsp: Result<_, _> =
                             gitlab::api::raw(endpoint).query_async(&self.gitlab).await;
                         let mut state = self.state.lock().await;
@@ -1264,7 +1264,7 @@ impl Main {
                         endpoint.project(config.project.clone());
                         endpoint.order_by(PipelineOrderBy::Id);
                         endpoint.ref_(info.r#ref.to_owned());
-                        let endpoint = endpoint.build().map_err(Error::BuilderError)?;
+                        let endpoint = endpoint.build().map_err(|e| Error::BuilderError(e.to_string()))?;
                         let endpoint =
                             gitlab::api::paged(endpoint, gitlab::api::Pagination::Limit(2));
                         let pipelines: Vec<Pipeline> = endpoint
@@ -1390,7 +1390,7 @@ impl Main {
                 endpoint.project(config.project.clone());
                 endpoint.pipeline(id);
                 let endpoint = endpoint.build()
-                    .map_err(Error::BuilderError)?;
+                    .map_err(|e| Error::BuilderError(e.to_string()))?;
 
                 let mut prev_state = None;
                 let mut mr_info = None;
@@ -1400,12 +1400,14 @@ impl Main {
                         .query_async(client)
                         .await;
                     if let Err(err) = &rsp {
-                        if let gitlab::api::ApiError::Gitlab { msg } = &err {
-                            if msg == "404 Not found" {
-                                eprintln!("Pipeline not found");
-                                is_error = true;
-                                break;
-                            }
+                        let is_404 = matches!(err,
+                            gitlab::api::ApiError::GitlabWithStatus { status, .. }
+                                if status.as_u16() == 404,
+                        );
+                        if is_404 {
+                            eprintln!("Pipeline not found");
+                            is_error = true;
+                            break;
                         }
                     }
                     let pipeline_details: PipelineDetails = rsp
@@ -1541,7 +1543,7 @@ impl Main {
         let client = builder.build_async().await?;
         let endpoint = users::CurrentUser::builder()
             .build()
-            .map_err(Error::BuilderError)?;
+            .map_err(|e| Error::BuilderError(e.to_string()))?;
         let current_user: User = endpoint
             .query_async(&client)
             .await
@@ -2870,7 +2872,7 @@ impl Main {
                 endpoint.project(config.project.clone());
                 endpoint.order_by(PipelineOrderBy::Id);
                 endpoint.ref_(remote_ref.to_owned());
-                let endpoint = endpoint.build().map_err(Error::BuilderError)?;
+                let endpoint = endpoint.build().map_err(|e| Error::BuilderError(e.to_string()))?;
                 let endpoint = gitlab::api::paged(endpoint, gitlab::api::Pagination::Limit(1));
 
                 let mut pipelines: Vec<Pipeline> = endpoint
@@ -3494,7 +3496,7 @@ async fn get_merge_requests_by_pipeline(config: &Config, r: &String, client: &As
         .state(MergeRequestState::Opened)
         .sort(SortOrder::Descending)
         .build()
-        .map_err(Error::BuilderError)?;
+        .map_err(|e| Error::BuilderError(e.to_string()))?;
 
     Ok(endpoint
         .query_async(client)
@@ -3524,7 +3526,7 @@ async fn get_merge_requests(
         let user_endpoint = users::Users::builder()
             .username(&username)
             .build()
-            .map_err(Error::BuilderError)?;
+            .map_err(|e| Error::BuilderError(e.to_string()))?;
 
         let users: Vec<UserWithId> = user_endpoint
             .query_async(client)
@@ -3542,7 +3544,7 @@ async fn get_merge_requests(
         // Use the current user's ID
         let current_user_endpoint = users::CurrentUser::builder()
             .build()
-            .map_err(Error::BuilderError)?;
+            .map_err(|e| Error::BuilderError(e.to_string()))?;
 
         let current_user: UserWithId = current_user_endpoint
             .query_async(client)
@@ -3559,7 +3561,7 @@ async fn get_merge_requests(
         .sort(SortOrder::Descending)
         .author(user_id)
         .build()
-        .map_err(Error::BuilderError)?;
+        .map_err(|e| Error::BuilderError(e.to_string()))?;
 
     let endpoint = gitlab::api::paged(
         endpoint,

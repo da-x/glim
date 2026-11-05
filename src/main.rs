@@ -234,6 +234,10 @@ enum CommandMode {
     #[structopt(name = "jobs")]
     Jobs(JobsMode),
 
+    /// Print a job's trace log to stdout
+    #[structopt(name = "log")]
+    Log(LogOptions),
+
     /// Wait for stuff to finish
     #[structopt(name = "wait")]
     Wait(WaitOptions),
@@ -291,6 +295,12 @@ enum MergeRequestsOptions {
         #[structopt(long = "username", short = "u")]
         custom_username: Option<String>,
     },
+}
+
+#[derive(Debug, StructOpt, Clone)]
+struct LogOptions {
+    /// Job ID
+    job_id: u64,
 }
 
 #[derive(Debug, StructOpt, Clone)]
@@ -1312,6 +1322,10 @@ impl Main {
 
                 return Ok(RunMode::None);
             }
+            CommandMode::Log(opts) => {
+                Self::handle_log(opts, config, client).await?;
+                return Ok(RunMode::None);
+            }
             CommandMode::MergeRequests(opts) => {
                 return Ok(RunMode::MergeRequests(opts));
             },
@@ -1369,6 +1383,37 @@ impl Main {
                 }));
             }
         }
+    }
+
+    async fn handle_log(
+        opts: LogOptions,
+        config: &Config,
+        client: &AsyncGitlab,
+    ) -> Result<(), Error> {
+        let endpoint = projects::jobs::JobTrace::builder()
+            .project(config.project.clone())
+            .job(opts.job_id)
+            .build()
+            .map_err(Error::BuilderError)?;
+
+        let bytes: Vec<u8> = gitlab::api::raw(endpoint)
+            .query_async(client)
+            .await
+            .map_err(|x| Error::BoxError(Box::new(x)))?;
+
+        let mut stdout = std::io::stdout();
+        if let Err(e) = stdout.write_all(&bytes) {
+            if e.kind() != std::io::ErrorKind::BrokenPipe {
+                return Err(e.into());
+            }
+            return Ok(());
+        }
+        if let Err(e) = stdout.flush() {
+            if e.kind() != std::io::ErrorKind::BrokenPipe {
+                return Err(e.into());
+            }
+        }
+        Ok(())
     }
 
     async fn handle_wait(

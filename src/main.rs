@@ -1256,6 +1256,96 @@ impl Main {
         Ok(s.trim().to_owned())
     }
 
+    /// Project path from a git remote URL whose host equals `hostname`.
+    ///
+    /// `git@git.example.com:group/my-project.git` with hostname `git.example.com`
+    /// yields `group/my-project`.
+    fn project_from_remote_url(url: &str, hostname: &str) -> Option<String> {
+        let url = url.trim();
+        if url.is_empty() || hostname.is_empty() {
+            return None;
+        }
+
+        let (host, path) = if let Some((_, rest)) = url.split_once("://") {
+            // scheme://[user[:pass]@]host[:port]/path
+            let rest = rest.split_once('@').map(|(_, hostpath)| hostpath).unwrap_or(rest);
+            let (hostport, path) = rest.split_once('/')?;
+            let host = hostport.split(':').next().unwrap_or(hostport);
+            (host, path)
+        } else {
+            // [user@]host:path (scp-style)
+            let rest = url.split_once('@').map(|(_, hostpath)| hostpath).unwrap_or(url);
+            let (host, path) = rest.split_once(':')?;
+            if host.contains('/') {
+                return None;
+            }
+            (host, path)
+        };
+
+        if !host.eq_ignore_ascii_case(hostname) {
+            return None;
+        }
+
+        let path = path.trim_start_matches('/');
+        let path = path.trim_end_matches('/');
+        let path = path.strip_suffix(".git").unwrap_or(path);
+        let path = path.trim_end_matches('/');
+        if path.is_empty() {
+            return None;
+        }
+        Some(path.to_owned())
+    }
+
+    /// Pick a project from `git remote -v` output. Prefer `origin`'s fetch URL
+    /// when its host matches; otherwise the first non-push remote that matches.
+    fn project_from_remotes_output(output: &str, hostname: &str) -> Option<String> {
+        let mut first_fetch = None;
+        let mut origin_fetch = None;
+        for line in output.lines() {
+            let mut parts = line.split_whitespace();
+            let name = match parts.next() {
+                Some(name) => name,
+                None => continue,
+            };
+            let url = match parts.next() {
+                Some(url) => url,
+                None => continue,
+            };
+            if parts.next() == Some("(push)") {
+                continue;
+            }
+            if let Some(project) = Self::project_from_remote_url(url, hostname) {
+                if first_fetch.is_none() {
+                    first_fetch = Some(project.clone());
+                }
+                if name == "origin" && origin_fetch.is_none() {
+                    origin_fetch = Some(project);
+                }
+            }
+        }
+        origin_fetch.or(first_fetch)
+    }
+
+    /// Project path from a remote of the current repo whose host equals `hostname`.
+    ///
+    /// Git failing, or no matching remote, yields `Ok(None)` so the configured
+    /// project stays in place.
+    fn project_from_git_remotes(hostname: &str) -> Result<Option<String>, Error> {
+        let output = match Command::new("git")
+            .args(["remote", "-v"])
+            .stderr(std::process::Stdio::null())
+            .output()
+        {
+            Ok(output) => output,
+            Err(_) => return Ok(None),
+        };
+        if !output.status.success() {
+            return Ok(None);
+        }
+        let text = String::from_utf8_lossy(&output.stdout);
+        Ok(Self::project_from_remotes_output(&text, hostname))
+    }
+
     async fn command_mode_to_run_mode(
         client: &AsyncGitlab,
         mode: CommandMode,
@@ -1573,7 +1663,15 @@ impl Main {
             .merge(config::Environment::with_prefix("GITLAB_CI_CONSOLE"))?;
 
         // Print out our settings (as a HashMap)
-        let config = settings.try_into::<Config>()?;
+        let mut config = settings.try_into::<Config>()?;
+        if let CommandMode::FromAlias(_) = &opt.command {
+            if let Some(project) = Self::project_from_git_remotes(&config.hostname)? {
+                if opt.debug {
+                    eprintln!("Using project '{}' from git remote", project);
+                }
+                config.project = project;
+            }
+        }
         let config2 = config.clone();
 
         let mut builder = GitlabBuilder::new(&config.hostname, &config.api_key);
@@ -3657,5 +3755,114 @@ fn main() {
             eprintln!("{}", e);
             std::process::exit(-1);
         }
+    }
+}
+
+#[cfg(test)]
+mod project_from_remote_tests {
+    use super::Main;
+
+    #[test]
+    fn scp_origin_matches_configured_host() {
+        let output = "origin\tgit@git.example.com:group/my-project.git (fetch)\n";
+        assert_eq!(
+            Main::project_from_remotes_output(output, "git.example.com").as_deref(),
+            Some("group/my-project")
+        );
+    }
+
+    #[test]
+    fn https_ssh_port_nested_group_and_missing_git_suffix() {
+        assert_eq!(
+            Main::project_from_remote_url(
+                "https://git.example.com/group/my-project.git",
+                "git.example.com"
+            )
+            .as_deref(),
+            Some("group/my-project")
+        );
+        assert_eq!(
+            Main::project_from_remote_url(
+                "https://user:token@git.example.com/group/team/my-project",
+                "git.example.com"
+            )
+            .as_deref(),
+            Some("group/team/my-project")
+        );
+        assert_eq!(
+            Main::project_from_remote_url(
+                "ssh://git@git.example.com:2222/group/sub/proj.git",
+                "git.example.com"
+            )
+            .as_deref(),
+            Some("group/sub/proj")
+        );
+        assert_eq!(
+            Main::project_from_remote_url(
+                "ssh://git@git.example.com/group/my-project.git/",
+                "Git.Example.COM"
+            )
+            .as_deref(),
+            Some("group/my-project")
+        );
+    }
+
+    #[test]
+    fn push_url_does_not_override_fetch() {
+        let output = "\
+origin\tgit@git.example.com:group/my-project.git (fetch)
+origin\tgit@git.example.com:dev/other.git (push)
+";
+        assert_eq!(
+            Main::project_from_remotes_output(output, "git.example.com").as_deref(),
+            Some("group/my-project")
+        );
+    }
+
+    #[test]
+    fn later_remote_matches_when_origin_host_differs() {
+        let output = "\
+origin\tgit@github.com:other/repo.git (fetch)
+origin\tgit@github.com:other/repo.git (push)
+upstream\tgit@git.example.com:group/my-project.git (fetch)
+upstream\tgit@git.example.com:group/my-project.git (push)
+";
+        assert_eq!(
+            Main::project_from_remotes_output(output, "git.example.com").as_deref(),
+            Some("group/my-project")
+        );
+    }
+
+    #[test]
+    fn origin_wins_when_another_remote_also_matches() {
+        let output = "\
+upstream\tgit@git.example.com:other/proj.git (fetch)
+origin\tgit@git.example.com:group/my-project.git (fetch)
+";
+        assert_eq!(
+            Main::project_from_remotes_output(output, "git.example.com").as_deref(),
+            Some("group/my-project")
+        );
+    }
+
+    #[test]
+    fn substring_host_does_not_match() {
+        let output = "origin\tgit@git.example.com.invalid:group/my-project.git (fetch)\n";
+        assert_eq!(
+            Main::project_from_remotes_output(output, "git.example.com"),
+            None
+        );
+    }
+
+    #[test]
+    fn no_matching_remote() {
+        let output = "\
+origin\tgit@github.com:other/repo.git (fetch)
+origin\thttps://github.com/other/repo.git (push)
+";
+        assert_eq!(
+            Main::project_from_remotes_output(output, "git.example.com"),
+            None
+        );
     }
 }

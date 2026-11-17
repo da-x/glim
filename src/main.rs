@@ -1239,6 +1239,39 @@ impl Main {
         Ok(())
     }
 
+    fn print_jobs(
+        jobs: &[Job],
+        stdout: &mut impl std::io::Write,
+        config: &Config,
+        json_output: bool,
+    ) -> Result<(), Error> {
+        for job in jobs {
+            if json_output {
+                if let Err(e) = writeln!(stdout, "{}", serde_json::to_string(job)?) {
+                    if e.kind() != std::io::ErrorKind::BrokenPipe {
+                        eprintln!("{}", e);
+                        return Err(e.into());
+                    }
+                }
+            } else if let Err(e) = writeln!(
+                stdout,
+                "{:<9}  {:<9}  {:<10}  {}  {}",
+                job.id,
+                job.pipeline.id,
+                job.status,
+                job.name,
+                config.get_job_url(job.id)
+            ) {
+                if e.kind() != std::io::ErrorKind::BrokenPipe {
+                    eprintln!("{}", e);
+                    return Err(e.into());
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     fn get_remote_branch(config: &Config) -> Result<String, Error> {
         let shell = std::env::var("SHELL")?;
         let mut command = Command::new(shell);
@@ -1958,7 +1991,7 @@ impl Main {
     async fn check_report_non_interactive(&mut self) -> Result<bool, Error> {
         match &self.mode {
             RunMode::Jobs { .. } => {
-                return Ok(true);
+                return self.non_interactive_jobs().await;
             }
             RunMode::PipeDiff { .. } => {
                 return self.non_interactive_pipediff().await;
@@ -1971,6 +2004,18 @@ impl Main {
             }
             _ => {}
         };
+
+        Ok(false)
+    }
+
+    async fn non_interactive_jobs(&mut self) -> Result<bool, Error> {
+        let state = self.state.lock().await;
+        let mut stdout = std::io::stdout();
+
+        if let Some((_, jobs)) = &state.jobs.data {
+            Self::print_jobs(jobs, &mut stdout, &self.config, self.opt.json_output)?;
+            return Ok(true);
+        }
 
         Ok(false)
     }
@@ -3852,6 +3897,73 @@ origin\tgit@git.example.com:group/my-project.git (fetch)
             Main::project_from_remotes_output(output, "git.example.com"),
             None
         );
+    }
+
+    #[test]
+    fn text_and_json_include_jobs_from_each_pipeline() {
+        use chrono::{Local, TimeZone};
+        use super::{Config, ConfigHooks, Job, Pipeline};
+
+        let t = Local.timestamp_opt(0, 0).single().expect("timestamp");
+        let pipeline = |id: u64| Pipeline {
+            id,
+            status: "success".into(),
+            r#ref: "main".into(),
+            sha: "abcdef".into(),
+            web_url: format!("https://git.example.com/group/proj/-/pipelines/{id}"),
+            created_at: t,
+            updated_at: t,
+        };
+        let jobs = vec![
+            Job {
+                id: 11,
+                name: "compile".into(),
+                status: "success".into(),
+                pipeline: pipeline(100),
+                allow_failure: false,
+            },
+            Job {
+                id: 22,
+                name: "test".into(),
+                status: "failed".into(),
+                pipeline: pipeline(200),
+                allow_failure: false,
+            },
+        ];
+        let config = Config {
+            api_key: "token".into(),
+            hostname: "git.example.com".into(),
+            project: "group/proj".into(),
+            local_repo: None,
+            cookie: None,
+            cert_insecure: false,
+            refresh: 10,
+            hooks: ConfigHooks::default(),
+        };
+
+        let mut text = Vec::new();
+        Main::print_jobs(&jobs, &mut text, &config, false).unwrap();
+        let text = String::from_utf8(text).unwrap();
+        let lines: Vec<_> = text.lines().collect();
+        assert_eq!(lines.len(), 2);
+        assert!(text.contains("compile"));
+        assert!(text.contains("test"));
+        assert!(text.contains("100"));
+        assert!(text.contains("200"));
+        assert!(text.contains("https://git.example.com/group/proj/-/jobs/11"));
+        assert!(text.contains("https://git.example.com/group/proj/-/jobs/22"));
+
+        let mut json = Vec::new();
+        Main::print_jobs(&jobs, &mut json, &config, true).unwrap();
+        let json = String::from_utf8(json).unwrap();
+        let lines: Vec<_> = json.lines().filter(|l| !l.is_empty()).collect();
+        assert_eq!(lines.len(), 2);
+        for line in &lines {
+            let value: serde_json::Value = serde_json::from_str(line).unwrap();
+            assert!(value.get("pipeline").and_then(|p| p.get("id")).is_some());
+        }
+        assert!(json.contains("100"));
+        assert!(json.contains("200"));
     }
 
     #[test]

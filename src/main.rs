@@ -1236,6 +1236,17 @@ impl Main {
             }
         }
 
+        Self::flush_stdout()?;
+        Ok(())
+    }
+
+    fn flush_stdout() -> Result<(), Error> {
+        let mut stdout = std::io::stdout();
+        if let Err(e) = stdout.flush() {
+            if e.kind() != std::io::ErrorKind::BrokenPipe {
+                return Err(e.into());
+            }
+        }
         Ok(())
     }
 
@@ -1269,6 +1280,7 @@ impl Main {
             }
         }
 
+        Self::flush_stdout()?;
         Ok(())
     }
 
@@ -1605,6 +1617,7 @@ impl Main {
                         } else {
                             println!("Pipeline {} status: {}", id, pipeline_details.status);
                         }
+                        Self::flush_stdout()?;
                     }
                     match str_status {
                         "success" | "failed" | "skipped" => {
@@ -1623,6 +1636,7 @@ impl Main {
                                     }
                                 }
                                 println!("");
+                                Self::flush_stdout()?;
                             };
                             break;
                         }
@@ -1869,7 +1883,13 @@ impl Main {
             s.lines().map(|x| x.to_owned()).collect()
         });
 
-        let mut reader = EventStream::new();
+        // EventStream opens /dev/tty and panics when that reader is missing.
+        // Non-interactive commands are used from pipes, so they never need it.
+        let mut reader = if self.non_interactive {
+            None
+        } else {
+            Some(EventStream::new())
+        };
         let mut rsp_recv = self.rsp_recv.take().unwrap();
 
         while !self.leave {
@@ -1937,6 +1957,7 @@ impl Main {
                     self.draw().await?;
                 } else {
                     if self.check_report_non_interactive().await? {
+                        Self::flush_stdout()?;
                         break;
                     }
                 }
@@ -1944,22 +1965,34 @@ impl Main {
 
             let delay = Delay::new(Duration::from_millis(1000));
 
-            select! {
-                _ = delay.fuse() => {  },
-                maybe_event = reader.next().fuse() => {
-                    match maybe_event {
-                        Some(Ok(CEvent::Mouse{..})) => continue,
-                        Some(Ok(event)) => { self.on_event(event).await? }
-                        Some(Err(_)) => {
-                            break;
+            if let Some(reader) = reader.as_mut() {
+                select! {
+                    _ = delay.fuse() => {  },
+                    maybe_event = reader.next().fuse() => {
+                        match maybe_event {
+                            Some(Ok(CEvent::Mouse{..})) => continue,
+                            Some(Ok(event)) => { self.on_event(event).await? }
+                            Some(Err(_)) => {
+                                break;
+                            }
+                            None => {}
                         }
-                        None => {}
+                    }
+                    msg = rsp_recv.next() => {
+                        match msg {
+                            Some(()) => {},
+                            None => {},
+                        }
                     }
                 }
-                msg = rsp_recv.next() => {
-                    match msg {
-                        Some(()) => {},
-                        None => {},
+            } else {
+                select! {
+                    _ = delay.fuse() => {  },
+                    msg = rsp_recv.next() => {
+                        match msg {
+                            Some(()) => {},
+                            None => {},
+                        }
                     }
                 }
             }
@@ -2034,6 +2067,7 @@ impl Main {
                     _ => {}
                 }
             }
+            Self::flush_stdout()?;
             return Ok(true);
         }
 
@@ -2066,6 +2100,7 @@ impl Main {
                     }
                 }
             }
+            Self::flush_stdout()?;
             return Ok(true);
         }
 
